@@ -89,7 +89,7 @@ bool GenerateSalt(u64& salt){
 }
 
 void PlatInit(){
-	WinInit();
+	WindowsInit();
 }
 
 #endif
