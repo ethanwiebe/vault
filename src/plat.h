@@ -7,6 +7,8 @@
 
 #include "types.h"
 
+#define PROGRAM_NAME "vault"
+
 #define CSI "\x1B["
 
 enum class YesNoAnswer : u8 {

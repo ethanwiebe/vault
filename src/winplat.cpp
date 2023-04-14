@@ -53,9 +53,9 @@ void EnableVT(){
 void WindowsInit(){
 	WinCryptInit();
 	EnableVT();
-	SetConsoleTitle("wordager");
+	SetConsoleTitle(PROGRAM_NAME);
 	Sleep(40);
-	consoleHwnd = FindWindow(NULL,"wordager");
+	consoleHwnd = FindWindow(NULL,PROGRAM_NAME);
 }
 
 void SetClipboard(const std::string& str){
