@@ -71,7 +71,7 @@
 	"libsha3Mode":{
 		"outputName":"libsha3.a",
 		"srcExts":["c"],
-		"srcDirs":["src/sha3"],
+		"srcDirs":["src","sha3"],
 		"outputDir":"build",
 		"compileFlags":["%cCompileFlags"],
 		"linkFlags":["%cLinkFlags"],
