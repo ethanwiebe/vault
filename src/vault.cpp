@@ -859,16 +859,29 @@ bool CreateVault(Vault& v){
 	
 	SecretString masterPass{};
 	
-	std::cout << "Enter vault master key: " << std::flush;
-	PasswordEntry(masterPass);
-	std::cout << '\n';
-	if (masterPass.empty()){
-		std::cout << "Canceling..." << std::endl;
-		std::error_code err;
-		fs::remove(path,err);
-		return false;
-	}
 	
+	while (true){
+		SecretString checkPass{};
+		
+		std::cout << "Enter vault master key: " << std::flush;
+		PasswordEntry(masterPass);
+		std::cout << '\n';
+		if (masterPass.empty()){
+			std::cout << "Canceling..." << std::endl;
+			std::error_code err;
+			fs::remove(path,err);
+			return false;
+		}
+		
+		std::cout << "Confirm master key: " << std::flush;
+		PasswordEntry(checkPass);
+		std::cout << '\n';
+		if (checkPass==masterPass){
+			break;
+		} else {
+			std::cout << "Master keys do not match!" << std::endl;
+		}
+	}
 	Sha3State key = InitKey(masterPass,v.salt);
 	v.SetKey(key);
 	v.fileBlockEnd = 0;
