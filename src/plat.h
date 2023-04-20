@@ -18,11 +18,11 @@ enum class YesNoAnswer : u8 {
 };
 
 bool GenerateSalt(u64& salt);
-void SetClipboard(const std::string& str);
+void SetClipboard(const SecretString& str);
 void ClearClipboard();
 u8 GetKey();
 void PlatInit();
-void PasswordEntry(std::string& pass);
+void PasswordEntry(SecretString& pass);
 
 inline u64 GetTime(){
 	return time(NULL);
@@ -64,8 +64,28 @@ inline void PrintDate(u64 time){
 	std::cout << local->tm_year+1900 << '/' << std::setw(2) << local->tm_mon+1 << '/' << std::setw(2) << local->tm_mday;
 }
 
-inline void ResetBackground(){
+inline void PrintDateAndTime(u64 time){
+	struct tm* local = localtime((time_t*)&time);
+	
+	std::cout << std::setfill('0');
+	std::cout << local->tm_year+1900 << '/' << std::setw(2) << local->tm_mon+1 << '/' << std::setw(2) << local->tm_mday;
+	std::cout << " " << std::setw(2) << local->tm_hour << ':' << std::setw(2) << local->tm_min;
+}
+
+inline void ResetTextStyle(){
 	std::cout << CSI "0m";
+}
+
+inline void InvertTextStyle(){
+	std::cout << CSI "7m";
+}
+
+inline void DirTextStyle(){
+	std::cout << CSI "94m";
+}
+
+inline void SecretTextStyle(){
+	std::cout << CSI "92m";
 }
 
 inline void SetBackgroundRGB(u8 r,u8 g,u8 b){

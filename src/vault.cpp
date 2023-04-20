@@ -5,10 +5,30 @@
 #include "sha3/sha3.h"
 #include "plat.h"
 
+// SHA-2 init hash constants
+#define ENCRYPT_KEY_CONSTANT  0xbb67ae856a09e667ULL
+#define COLOR_KEY_CONSTANT    0xa54ff53a3c6ef372ULL
+#define LOCDIR_KEY_CONSTANT   0x9b05688c510e527fULL
+#define HEADER_KEY_CONSTANT   0x5be0cd191f83d9abULL
+
+#define SECRET_KEY_CONSTANT   0x71374491428a2f98ULL
+
 #include <fstream>
 #include <filesystem>
+#include <bit>
+
+#define BYTESWAP16(x) ((((x)&0xFF)<<8) | (((x)&0xFF00)>>8))
+#define BYTESWAP32(x) ((((x)&0xFF)<<24) | (((x)&0xFF00)<<8) | (((x)&0xFF0000)>>8) | (((x)&0xFF000000)>>24))
+#define BYTESWAP64(x) ((((x)&0xFFULL)<<56) | (((x)&0xFF00ULL)<<40) | (((x)&0xFF0000ULL)<<24) | (((x)&0xFF000000ULL)<<8) | \
+					   (((x)&0xFF00000000ULL)>>8) | (((x)&0xFF0000000000ULL)>>24) | (((x)&0xFF000000000000ULL)>>40) | (((x)&0xFF00000000000000ULL)>>56))
 
 namespace fs = std::filesystem;
+
+static_assert(BYTESWAP64(BYTESWAP64(LOCDIR_KEY_CONSTANT))==LOCDIR_KEY_CONSTANT);
+static_assert(BYTESWAP32(BYTESWAP32((u32)LOCDIR_KEY_CONSTANT))==(u32)LOCDIR_KEY_CONSTANT);
+static_assert(BYTESWAP16(BYTESWAP16((u16)LOCDIR_KEY_CONSTANT))==(u16)LOCDIR_KEY_CONSTANT);
+
+extern bool gDebug;
 
 void TruncateString(std::string& str){
 	while (!str.empty()&&(str.front()==' '||str.front()=='\t')){
@@ -33,17 +53,13 @@ Sha3State InitKey(const std::string& pass,u64 salt){
 	return k;
 }
 
-void Secret::Open(Sha3State idKey){
-	key = idKey;
-	key.UpdateString(name);
-	key.UpdateU64((u64)type);
-	key.UpdateU64(genTime);
-	key.UpdatePassOptions(options);
-	key.Rehash(SUB_HASH_ROUNDS);
-}
-
-SecretString Secret::GetPass(){
-	Sha3State keyClone = key;
+SecretString Secret::GetPass(Sha3State key){
+	Sha3State keyClone = GenerateKey(key,SECRET_KEY_CONSTANT);
+	keyClone.UpdateU16((u16)type);
+	keyClone.UpdateU64(genTime);
+	keyClone.UpdateU32(options.length);
+	keyClone.Rehash(SUB_HASH_ROUNDS);
+	
 	HashResult& res = keyClone.result;
 	
 	SecretString pass{};
@@ -73,48 +89,42 @@ SecretString Secret::GetPass(){
 	return pass;
 }
 
-void Identity::Open(Sha3State masterKey){
-	key = masterKey;
-	key.UpdateString(name);
-	key.UpdateU64(genTime);
-	key.Rehash(SUB_HASH_ROUNDS);
+struct BufferWriteCtx {
+	std::fstream& out;
 	
-	for (auto& [name,secret] : secrets){
-		secret.Open(key);
+	void Write(const u8* data,size_t count){
+		out.write((const char*)data,count);
 	}
-}
-
-std::string Identity::GetSecretNameFromIndex(size_t index){
-	size_t i=0;
-	for (const auto& [name,secret] : secrets){
-		if (i==index) return name;
-		++i;
+	
+	void WriteU32(u32 num){
+		if constexpr (std::endian::native != std::endian::little){
+			u32 val = BYTESWAP32(num);
+			Write((u8*)&val,sizeof(u32));
+		} else {
+			Write((u8*)&num,sizeof(u32));
+		}
 	}
-	return {};
-}
-
-size_t Identity::GetSecretNameJust() const {
-	size_t maxL = 0;
-	for (const auto& [name,s] : secrets){
-		if (name.size()>maxL)
-			maxL = name.size();
+	
+	void WriteU64(u64 num){
+		if constexpr (std::endian::native != std::endian::little){
+			u64 val = BYTESWAP64(num);
+			Write((u8*)&val,sizeof(u64));
+		} else {
+			Write((u8*)&num,sizeof(u64));
+		}
 	}
-	return maxL;
-}
-
-void Identity::AddSecret(Secret& s){
-	s.Open(key);
-	secrets[s.name] = s;
-}
-
-void Identity::DeleteSecret(const std::string& name){
-	if (secrets.contains(name)){
-		secrets.erase(name);
+	
+	void WritePlainHeader(u64 salt){
+		static_assert(sizeof(VAULT_MAGIC)==4);
+		
+		Write(VAULT_MAGIC,sizeof(VAULT_MAGIC));
+		WriteU32(VERSION_NUMBER);
+		WriteU64(salt);
 	}
-}
+};
 
 struct BufferEncryptCtx {
-	std::ofstream& out;
+	std::fstream& out;
 	Sha3State& key;
 	u32 keyBytes = 0;
 	
@@ -130,11 +140,34 @@ struct BufferEncryptCtx {
 	}
 	
 	void EncryptU64(u64 num){
-		Encrypt((u8*)&num,sizeof(u64));
+		if constexpr (std::endian::native != std::endian::little){
+			u64 val = BYTESWAP64(num);
+			Encrypt((u8*)&val,sizeof(u64));
+		} else {
+			Encrypt((u8*)&num,sizeof(u64));
+		}
 	}
 	
 	void EncryptU32(u32 num){
-		Encrypt((u8*)&num,sizeof(u32));
+		if constexpr (std::endian::native != std::endian::little){
+			u32 val = BYTESWAP32(num);
+			Encrypt((u8*)&val,sizeof(u32));
+		} else {
+			Encrypt((u8*)&num,sizeof(u32));
+		}
+	}
+	
+	void EncryptU16(u16 num){
+		if constexpr (std::endian::native != std::endian::little){
+			u16 val = BYTESWAP16(num);
+			Encrypt((u8*)&val,sizeof(u16));
+		} else {
+			Encrypt((u8*)&num,sizeof(u16));
+		}
+	}
+	
+	void EncryptU8(u8 num){
+		Encrypt(&num,sizeof(u8));
 	}
 	
 	void EncryptString(const std::string& str){
@@ -142,28 +175,99 @@ struct BufferEncryptCtx {
 		Encrypt((const u8*)str.data(),str.size());
 	}
 	
-	void EncryptSecret(const Secret& secret){
-		EncryptU32((u32)secret.type);
-		EncryptU64(secret.genTime);
-		EncryptString(secret.name);
+	void EncryptShortString(const std::string& str,bool extraBit=false){
+		u8 size = str.size() | (extraBit<<7);
+		EncryptU8(size);
+		Encrypt((const u8*)str.data(),str.size()&0x7F);
+	}
 		
-		static_assert(sizeof(PassOptions)==sizeof(u32));
-		EncryptU32(secret.options.length);
+	void EncryptFileDescriptor(const FileDescriptor& header){
+		bool mini = header.location.offset<=0xFFFF && header.location.size<=0xFFFF;
+		EncryptShortString(header.name,mini);
+		EncryptU32(header.salt);
+		EncryptU16((u16)header.type);
+		EncryptU64(header.genTime);
+		if (mini){
+			EncryptU16(header.location.offset);
+			EncryptU16(header.location.size);
+		} else {
+			EncryptU64(header.location.offset);
+			EncryptU64(header.location.size);
+		}
 	}
 	
-	void EncryptIdentity(const Identity& id){
-		EncryptU64(id.genTime);
-		size_t secretCount = id.secrets.size();
-		EncryptU64(secretCount);
-		for (const auto& [name,secret] : id.secrets){
-			EncryptString(name);
-			EncryptSecret(secret);
+	void EncryptDirectory(const Directory& dir){
+		bool mini = dir.dirs.size()<=0xFF && dir.files.size()<=0xFF;
+		EncryptShortString(dir.name,mini);
+		
+		if (mini){
+			EncryptU8(dir.dirs.size());
+			EncryptU8(dir.files.size());
+		} else {
+			EncryptU64(dir.dirs.size());
+			EncryptU64(dir.files.size());
 		}
+		
+		for (const auto& subdir : dir.dirs){
+			EncryptDirectory(subdir);
+		}
+		
+		for (const auto& file : dir.files){
+			EncryptFileDescriptor(file);
+		}
+	}
+	
+	void EncryptLocationDirectory(const LocationDirectory& locs){
+		EncryptDirectory(locs.root);
+	}
+	
+	void EncryptVaultHeader(u64 locDirSize){
+		u8 zeroes[ZERO_VECTOR_SIZE];
+		memset(zeroes,0,ZERO_VECTOR_SIZE);
+		
+		Encrypt(zeroes,ZERO_VECTOR_SIZE);
+		EncryptU64(locDirSize);
+	}
+};
+
+struct BufferReadCtx {
+	std::fstream& in;
+	
+	void Read(u8* data,size_t count){
+		in.read((char*)data,count);
+	}
+	
+	void ReadU32(u32& num){
+		if constexpr (std::endian::native != std::endian::little){
+			Read((u8*)&num,sizeof(u32));
+			num = BYTESWAP32(num);
+		} else {
+			Read((u8*)&num,sizeof(u32));
+		}
+	}
+	
+	void ReadU64(u64& num){
+		if constexpr (std::endian::native != std::endian::little){
+			Read((u8*)&num,sizeof(u64));
+			num = BYTESWAP64(num);
+		} else {
+			Read((u8*)&num,sizeof(u64));
+		}
+	}
+	
+	void ReadPlainHeader(PlainHeader& header){
+		Read(&header.magic[0],sizeof(VAULT_MAGIC));
+		ReadU32(header.version);
+		ReadU64(header.salt);
+	}
+	
+	void SeekToHeaderPos(){
+		in.seekg(PLAIN_HEADER_OFFSET,std::ios::end);
 	}
 };
 
 struct BufferDecryptCtx {
-	std::ifstream& in;
+	std::fstream& in;
 	Sha3State& key;
 	u32 keyBytes = 0;
 	
@@ -183,11 +287,34 @@ struct BufferDecryptCtx {
 	}
 	
 	void DecryptU64(u64& num){
-		Decrypt((u8*)&num,sizeof(u64));
+		if constexpr (std::endian::native != std::endian::little){
+			Decrypt((u8*)&num,sizeof(u64));
+			num = BYTESWAP64(num);
+		} else {
+			Decrypt((u8*)&num,sizeof(u64));
+		}
 	}
 	
 	void DecryptU32(u32& num){
-		Decrypt((u8*)&num,sizeof(u32));
+		if constexpr (std::endian::native != std::endian::little){
+			Decrypt((u8*)&num,sizeof(u32));
+			num = BYTESWAP32(num);
+		} else {
+			Decrypt((u8*)&num,sizeof(u32));
+		}
+	}
+	
+	void DecryptU16(u16& num){
+		if constexpr (std::endian::native != std::endian::little){
+			Decrypt((u8*)&num,sizeof(u16));
+			num = BYTESWAP16(num);
+		} else {
+			Decrypt((u8*)&num,sizeof(u16));
+		}
+	}
+	
+	void DecryptU8(u8& num){
+		Decrypt(&num,sizeof(u8));
 	}
 	
 	void DecryptString(std::string& str){
@@ -198,120 +325,411 @@ struct BufferDecryptCtx {
 		Decrypt(d,size);
 	}
 	
-	void DecryptSecret(Secret& secret){
-		secret = {};
-		u32 type;
-		DecryptU32(type);
-		secret.type = (SecretType)type;
-		DecryptU64(secret.genTime);
-		DecryptString(secret.name);
-		
-		static_assert(sizeof(PassOptions)==sizeof(u32));
-		DecryptU32(secret.options.length);
+	void DecryptShortString(std::string& str,bool& extraBit){
+		u8 size;
+		DecryptU8(size);
+		extraBit = size&(1<<7);
+		size &= 0x7F;
+		str.resize(size);
+		Decrypt((u8*)str.data(),size);
 	}
 	
-	void DecryptIdentity(Identity& id){
-		id.secrets = {};
-		DecryptU64(id.genTime);
-		size_t secretCount;
-		DecryptU64(secretCount);
+	bool DecryptFile(File& file,u64 size){
+		u8 magic[sizeof(FILE_MAGIC)];
+		Decrypt(&magic[0],sizeof(FILE_MAGIC));
 		
-		std::string name;
-		Secret secret;
-		for (size_t i=0;i<secretCount;++i){
-			DecryptString(name);
-			DecryptSecret(secret);
-			id.secrets[name] = secret;
+		if (memcmp(magic,FILE_MAGIC,sizeof(FILE_MAGIC))!=0){
+			return false;
 		}
+		
+		file.data.resize(size);
+		Decrypt(file.data.data(),size);
+		
+		return true;
+	}
+	
+	void DecryptFileDescriptor(FileDescriptor& header){
+		bool mini;
+		DecryptShortString(header.name,mini);
+		DecryptU32(header.salt);
+		u16 type;
+		DecryptU16(type);
+		header.type = (FileType)type;
+		DecryptU64(header.genTime);
+		if (mini){
+			u16 smallOffset,smallSize;
+			DecryptU16(smallOffset);
+			DecryptU16(smallSize);
+			header.location.offset = smallOffset;
+			header.location.size = smallSize;
+		} else {
+			DecryptU64(header.location.offset);
+			DecryptU64(header.location.size);
+		}
+	}
+	
+	void DecryptDirectory(Directory& dir){
+		bool mini;
+		DecryptShortString(dir.name,mini);
+		
+		u64 dirCount;
+		u64 fileCount;
+		
+		if (mini){
+			u8 smallDirCount;
+			u8 smallFileCount;
+			DecryptU8(smallDirCount);
+			DecryptU8(smallFileCount);
+			dirCount = smallDirCount;
+			fileCount = smallFileCount;
+		} else {
+			DecryptU64(dirCount);
+			DecryptU64(fileCount);
+		}
+		
+		dir.dirs = {};
+		dir.files = {};
+		
+		Directory sub;
+		for (u64 i=0;i<dirCount;++i){
+			sub.parent = &dir;
+			dir.dirs.push_back(sub);
+			DecryptDirectory(dir.dirs.back());
+		}
+		
+		FileDescriptor desc;
+		for (u64 i=0;i<fileCount;++i){
+			DecryptFileDescriptor(desc);
+			dir.AddFile(desc);
+		}
+	}
+	
+	void DecryptLocationDirectory(LocationDirectory& locs){
+		DecryptDirectory(locs.root);
+	}
+	
+	void DecryptVaultHeader(VaultHeader& header){
+		Decrypt(header.zeroes,ZERO_VECTOR_SIZE);
+		DecryptU64(header.locDirSize);
 	}
 };
 
-bool Vault::Encrypt(std::ofstream& out,Sha3State key){
-	Sha3State encryptKey = GenerateKey(key,ENCRYPT_KEY_CONSTANT);
-	BufferEncryptCtx ctx{out,encryptKey};
-	
-	u8 zeroes[ZERO_VECTOR_SIZE];
-	memset(zeroes,0,ZERO_VECTOR_SIZE);
-	
-	ctx.Encrypt(&zeroes[0],ZERO_VECTOR_SIZE);
-	u32 version = VERSION_NUMBER;
-	ctx.EncryptU32(version);
-	
-	ctx.EncryptU64(identities.size());
-	for (const auto& [name,id] : identities){
-		ctx.EncryptString(name);
-		ctx.EncryptIdentity(id);
+void File::WriteU64(u64 num){
+	for (u64 i=0;i<sizeof(u64);++i){
+		data.push_back(num&0xFF);
+		num >>= 8;
 	}
-	
-	changed = false;
-	return ctx.out.good();
 }
 
-bool Vault::Decrypt(std::ifstream& in,Sha3State key,bool& decrypted){
-	Sha3State decryptKey = GenerateKey(key,ENCRYPT_KEY_CONSTANT);
-	BufferDecryptCtx ctx{in,decryptKey};
-	
-	u8 zeroes[ZERO_VECTOR_SIZE];
-	ctx.Decrypt(&zeroes[0],ZERO_VECTOR_SIZE);
-	for (u32 i=0;i<ZERO_VECTOR_SIZE;++i){
-		if (zeroes[i]!=0){
-			decrypted = false;
-			return true;
+u64 File::ReadU64(){
+	u64 num = 0;
+	for (u64 i=0;i<sizeof(u64);++i){
+		num |= data[readHead++]<<(i*8);
+	}
+	return num;
+}
+
+void File::WriteU32(u32 num){
+	for (u64 i=0;i<sizeof(u32);++i){
+		data.push_back(num&0xFF);
+		num >>= 8;
+	}
+}
+
+u32 File::ReadU32(){
+	u32 num = 0;
+	for (u64 i=0;i<sizeof(u32);++i){
+		num |= data[readHead++]<<(i*8);
+	}
+	return num;
+}
+
+u64 Directory::GetBiggestNameSize() const {
+	u64 s = 0;
+	for (const auto& dir : dirs){
+		if (dir.name.size()>s){
+			s = dir.name.size();
+		}
+	}
+	for (const auto& file : files){
+		if (file.name.size()>s){
+			s = file.name.size();
 		}
 	}
 	
-	decrypted = true;
+	return s;
+}
+
+void Directory::AddSize(s64 size){
+	recursiveSize += size;
+	if (parent){
+		parent->AddSize(size);
+	}
+}
+
+void Directory::AddFile(const FileDescriptor& desc){
+	files.push_back(desc);
+	AddSize(desc.location.size+FILE_HEADER_SIZE);
+}
+
+void Directory::DeleteFile(FileDescriptor& delFile){
+	auto it = files.begin();
+	for (auto& file : files){
+		if (&file==&delFile){
+			break;
+		}
+		++it;
+	}
 	
-	u32 version;
-	ctx.DecryptU32(version);
-	if (version!=VERSION_NUMBER){
+	if (it!=files.end()){
+		AddSize(-(delFile.location.size+FILE_HEADER_SIZE));
+		files.erase(it);
+	}
+}
+
+void Directory::AddDir(const SecretString& name){
+	Directory d{name};
+	d.parent = this;
+	d.recursiveSize = 0;
+	dirs.push_back(d);
+}
+
+void Directory::ShrinkFilesAfter(u64 offset,u64 amount){
+	for (auto& dir : dirs){
+		dir.ShrinkFilesAfter(offset,amount);
+	}
+	
+	for (auto& file : files){
+		if (file.location.offset>offset){
+			file.location.offset -= amount;
+		}
+	}
+}
+
+bool Directory::NameIsTaken(const SecretString& name) const {
+	for (const auto& dir : dirs){
+		if (dir.name==name) return true;
+	}
+	
+	for (const auto& file : files){
+		if (file.name==name) return true;
+	}
+	
+	return false;
+}
+
+u64 Directory::CountFiles() const {
+	u64 count = files.size();
+	for (const auto& dir : dirs){
+		count += dir.CountFiles();
+	}
+	
+	return count;
+}
+
+FilePointer Vault::GetFile(const FileDescriptor& desc){
+	FilePointer fp = std::make_unique<File>();
+	vaultFile.seekg(desc.location.offset);
+	
+	Sha3State encryptCopy = encryptKey;
+	encryptCopy.UpdateU64(desc.genTime);
+	encryptCopy.UpdateU32(desc.salt);
+	
+	BufferDecryptCtx ctx{vaultFile,encryptCopy};
+	if (!ctx.DecryptFile(*fp,desc.location.size)) return nullptr;
+	
+	fp->readHead = 0;
+	return fp;
+}
+
+// sets header.location
+void Vault::AddFile(const File& file,FileDescriptor& desc){
+	desc.genTime = GetTime();
+	u64 salt;
+	GenerateSalt(salt);
+	desc.salt = (u32)salt;
+	
+	WriteFileAtEnd(file,desc);
+	desc.location.offset = fileBlockEnd;
+	desc.location.size = file.data.size();
+	fileBlockEnd += desc.location.size+FILE_HEADER_SIZE;
+	
+	currentDir->AddFile(desc);
+	WriteDirectoryAndHeader();
+}
+
+// deletes the file from the file block table without 
+// deleting it from the location directory
+void Vault::DeleteFileRaw(FileDescriptor& delFile){
+	FileLocation loc = delFile.location;
+	// copy data to close gap
+	std::vector<char> buffer{};
+	
+	u64 writeDist = fileBlockEnd-(loc.offset+loc.size+FILE_HEADER_SIZE);
+	buffer.resize(writeDist);
+	
+	vaultFile.seekg(loc.offset+loc.size+FILE_HEADER_SIZE);
+	vaultFile.read(buffer.data(),writeDist);
+	
+	vaultFile.seekp(loc.offset);
+	vaultFile.write(buffer.data(),writeDist);
+	
+	std::fill(buffer.begin(),buffer.end(),0);
+	
+	fileBlockEnd -= loc.size+FILE_HEADER_SIZE;
+	directory.root.ShrinkFilesAfter(loc.offset,loc.size+FILE_HEADER_SIZE);
+}
+
+// deletes a file in the current directory
+void Vault::DeleteFile(FileDescriptor& delFile){
+	DeleteFileRaw(delFile);
+	currentDir->DeleteFile(delFile);
+	WriteDirectoryAndHeader();
+}
+
+void Vault::AddDir(const SecretString& name){
+	currentDir->AddDir(name);
+	WriteDirectoryAndHeader();
+}
+
+void Vault::DeleteRecursive(Directory& delDir){
+	for (auto& dir : delDir.dirs){
+		DeleteRecursive(dir);
+	}
+	
+	for (auto& file : delDir.files){
+		delDir.AddSize(-(file.location.size+FILE_HEADER_SIZE));
+		DeleteFileRaw(file);
+	}
+}
+
+// dir is guaranteed to be a child of currentDir
+void Vault::DeleteDir(Directory& delDir){
+	auto it = currentDir->dirs.begin();
+	for (auto& dir : currentDir->dirs){
+		if (&dir==&delDir){
+			break;
+		}
+		++it;
+	}
+	
+	if (it!=currentDir->dirs.end()){
+		DeleteRecursive(*it);
+		currentDir->dirs.erase(it);
+	}
+	
+	WriteDirectoryAndHeader();
+}
+
+void Vault::SetKey(Sha3State& k){
+	key = k;
+	encryptKey = GenerateKey(key,ENCRYPT_KEY_CONSTANT);
+}
+
+void Vault::SetFile(std::fstream&& f,const std::string& path){
+	vaultPath = path;
+	vaultFile = std::move(f);
+}
+
+bool Vault::TryDecrypt(Sha3State& k){
+	SetKey(k);
+	
+	Sha3State headerKey = GenerateKey(key,HEADER_KEY_CONSTANT);
+	BufferDecryptCtx ctx{vaultFile,headerKey};
+	
+	vaultFile.seekg(VAULT_HEADER_OFFSET,std::ios::end);
+	u8 zeroes[ZERO_VECTOR_SIZE];
+	ctx.Decrypt(&zeroes[0],ZERO_VECTOR_SIZE);
+	
+	for (u32 i=0;i<ZERO_VECTOR_SIZE;++i){
+		if (zeroes[i]!=0){
+			if (gDebug){
+				std::cout << "Decrypt prefix: " << i*8+std::countr_zero(zeroes[i]) << std::endl;
+			}
+			return false;
+		}
+	}
+	
+	if (gDebug){
+		std::cout << "Decrypt prefix: " << ZERO_VECTOR_SIZE*8 << std::endl;
+	}
+	
+	u64 locDirSize;
+	ctx.DecryptU64(locDirSize);
+	fileBlockEnd = (u64)vaultFile.tellg()-(PLAIN_HEADER_SIZE+VAULT_HEADER_SIZE+locDirSize);
+	
+	return true;
+}
+
+bool Vault::OpenFromFile(){
+	Sha3State locDirKey = GenerateKey(key,LOCDIR_KEY_CONSTANT);
+	BufferDecryptCtx ctx{vaultFile,locDirKey};
+	
+	vaultFile.seekg(fileBlockEnd);
+	if (!vaultFile)
 		return false;
-	}
 	
-	identities = {};
-	u64 count;
-	ctx.DecryptU64(count);
-	std::string name;
-	Identity id;
-	for (u64 i=0;i<count;++i){
-		ctx.DecryptString(name);
-		ctx.DecryptIdentity(id);
-		id.name = name;
-		identities[name] = id;
-	}
+	ctx.DecryptLocationDirectory(directory);
+	if (!vaultFile)
+		return false;
 	
-	for (auto& [name,id] : identities){
-		id.Open(key);
-	}
+	currentDir = &directory.root;
+	return true;
+}
+
+bool Vault::WriteFileAtEnd(const File& file,const FileDescriptor& desc){
+	Sha3State encryptCopy = encryptKey;
+	encryptCopy.UpdateU64(desc.genTime);
 	
-	changed = false;
-	return ctx.in.good();
+	BufferEncryptCtx ctx{vaultFile,encryptCopy};
+	vaultFile.seekp(fileBlockEnd);
+	
+	encryptCopy.UpdateU32(desc.salt);
+	
+	ctx.Encrypt(FILE_MAGIC,sizeof(FILE_MAGIC));
+	
+	ctx.Encrypt(file.data.data(),file.data.size());
+	return true;
 }
 
-void Vault::AddIdentity(Identity& id){
-	id.Open(key);
-	identities[id.name] = id;
-	changed = true;
+bool Vault::WriteDirectoryAndHeader(){
+	Sha3State locDirKey = GenerateKey(key,LOCDIR_KEY_CONSTANT);
+	BufferEncryptCtx ctx{vaultFile,locDirKey};
+	
+	vaultFile.seekp(fileBlockEnd);
+	ctx.EncryptLocationDirectory(directory);
+	u64 locDirSize = (u64)vaultFile.tellg()-fileBlockEnd;
+	
+	BufferWriteCtx plainCtx{vaultFile};
+	plainCtx.WritePlainHeader(salt);
+	
+	Sha3State headerKey = GenerateKey(key,HEADER_KEY_CONSTANT);
+	
+	BufferEncryptCtx headerCtx{vaultFile,headerKey};
+	headerCtx.EncryptVaultHeader(locDirSize);
+	
+	PostWrite(locDirSize);
+	return vaultFile.good();
 }
 
-void Vault::DeleteIdentity(const std::string& name){
-	if (identities.contains(name)){
-		identities.erase(name);
-		changed = true;
+void Vault::PostWrite(u64 locDirSize){
+	u64 fileSize = fileBlockEnd+locDirSize+PLAIN_HEADER_SIZE+VAULT_HEADER_SIZE;
+	fs::resize_file(vaultPath,fileSize);
+}
+
+bool Vault::AtRoot() const {
+	return currentDir==&directory.root;
+}
+
+SecretString Vault::GetPath() const {
+	Directory* currCopy = currentDir;
+	SecretString name{};
+	while (currCopy){
+		name.insert(0,1,'/');
+		name.insert(name.begin(),currCopy->name.begin(),currCopy->name.end());
+		currCopy = currCopy->parent;
 	}
-}
-
-bool Vault::IdentityExists(const std::string& name) const {
-	return identities.contains(name);
-}
-
-std::string Vault::GetIdentityNameFromIndex(size_t index) const {
-	size_t i = 0;
-	for (const auto& [name,id] : identities){
-		if (index==i) return name;
-		++i;
-	}
-	return {};
+	return name;
 }
 
 void PrintHash(HashResult res){
@@ -329,26 +747,44 @@ void DisplayKeyColors(Sha3State key){
 		std::cout << "  ";
 	}
 	
-	ResetBackground();
+	ResetTextStyle();
 }
 
-bool LoadVault(Vault& v){
-	std::ifstream vaultFile{v.path,std::ios::in|std::ios::binary};
-	if (!vaultFile){
-		std::cout << "Could not read vault from '" << v.path << "'!" << std::endl;
+bool LoadVault(Vault& v,const std::string& path){
+	std::error_code ec;
+	if (!fs::exists(path,ec)){
+		std::cout << "Could not find path '" << path << "'!" << std::endl;
 		return false;
 	}
 	
-	u64 salt;
-	vaultFile.read((char*)&salt,sizeof(u64));
-	v.salt = salt;
+	std::fstream vaultFile{path,std::ios::in|std::ios::out|std::ios::binary};
 	
-	auto pos = vaultFile.tellg();
+	BufferReadCtx readCtx{vaultFile};
+	readCtx.SeekToHeaderPos();
+	PlainHeader plainHeader;
+	readCtx.ReadPlainHeader(plainHeader);
+	
+	if (memcmp(&plainHeader.magic[0],VAULT_MAGIC,sizeof(VAULT_MAGIC))!=0){
+		std::cout << "This is not a vault file!" << std::endl;
+		std::cout << "Found " << std::hex << *((u32*)&plainHeader.magic[0]) << std::endl;
+		std::cout << "Expected " << *((u32*)&VAULT_MAGIC[0]) << std::endl;
+		std::cout << std::dec;
+		return false;
+	}
+	
+	if (plainHeader.version>VERSION_NUMBER){
+		std::cout << "Vault file uses a newer version of Vault!" << std::endl;
+		return false;
+	}
+	
+	v.salt = plainHeader.salt;
+	
+	v.SetFile(std::move(vaultFile),path);
 	
 	bool decrypted = false;
 	Sha3State key;
 	while (!decrypted){
-		std::string pass;
+		SecretString pass;
 		std::cout << "Enter master key: ";
 		std::cout << std::flush;
 		PasswordEntry(pass);
@@ -356,56 +792,18 @@ bool LoadVault(Vault& v){
 		if (pass.empty())
 			return false;
 		
-		key = InitKey(pass,salt);
+		key = InitKey(pass,plainHeader.salt);
 		
-		vaultFile.seekg(pos);
-		if (!v.Decrypt(vaultFile,key,decrypted)){
-			std::cout << "Error while reading vault from '" << v.path << "'!" << std::endl;
-			return false;
-		}
-		
+		decrypted = v.TryDecrypt(key);
 		if (!decrypted){
 			std::cout << "Wrong password!" << std::endl;
 		}
 	}
 	
-	v.key = key;
-	DisplayKeyColors(key);
-	std::cout << '\n';
-	std::cout << "Vault successfully loaded..." << std::endl;
-	
-	return true;
-}
-
-bool SaveVault(Vault& v){
-	std::string tempPath = v.path+".tmp";
-	{
-		std::ofstream vaultFile{tempPath,std::ios::out|std::ios::binary};
-		if (!vaultFile){
-			std::cout << "Could not save vault to '" << tempPath << "'!" << std::endl;
-			return false;
-		}
-		
-		vaultFile.write((const char*)&v.salt,sizeof(v.salt));
-		
-		if (!v.Encrypt(vaultFile,v.key)){
-			std::cout << "Could not encrypt vault to '" << tempPath << "'!" << std::endl;
-			return false;
-		}
-	}	
-	
-	std::error_code err;
-	fs::remove(v.path,err);
-	
-	if (!fs::copy_file(tempPath,v.path,err)){
-		std::cout << "Could not copy back temp file from '" << tempPath << "' to '" << v.path << "'!\n";
-		std::cout << "Err: " << err.message() << std::endl;
-		return false;
+	if (!v.OpenFromFile()){
+		std::cout << "Error while reading location directory!" << std::endl;
 	}
 	
-	fs::remove(tempPath,err);
-	
-	std::cout << "Vault saved successfully." << std::endl;
 	return true;
 }
 
@@ -419,6 +817,8 @@ bool CreateVault(Vault& v){
 		std::cout << std::flush;
 		std::getline(std::cin,path);
 		std::error_code err;
+		
+		if (path.empty()) return false;
 		
 		if (fs::exists(path,err)){
 			std::cout << "Filename '" << path << "' already exists!" << std::endl;
@@ -440,24 +840,24 @@ bool CreateVault(Vault& v){
 	
 	bool canWrite;
 	{
-		std::ofstream testRead{path,std::ios::out|std::ios::binary};
-		canWrite = testRead.good();
+		std::ofstream testWrite{path,std::ios::out|std::ios::binary};
+		canWrite = testWrite.good();
 	}
 	
-	if (path.empty()||!canWrite){
+	if (!canWrite){
 		std::cout << "Cannot write to '" << path << "'!" << std::endl;
 		return false;
 	}
 	
-	v.path = path;
+	v.vaultFile = std::fstream{path,std::ios::in|std::ios::out|std::ios::binary};
+	v.vaultPath = path;
 	
 	if (!GenerateSalt(v.salt)){
 		std::cout << "Could not generate random salt!" << std::endl;
 		return false;
 	}
-	v.identities = {};
 	
-	std::string masterPass{};
+	SecretString masterPass{};
 	
 	std::cout << "Enter vault master key: " << std::flush;
 	PasswordEntry(masterPass);
@@ -470,10 +870,15 @@ bool CreateVault(Vault& v){
 	}
 	
 	Sha3State key = InitKey(masterPass,v.salt);
-	v.key = key;
+	v.SetKey(key);
+	v.fileBlockEnd = 0;
+	v.directory = {};
+	v.currentDir = &v.directory.root;
 	
-	if (!SaveVault(v))
+	if (!v.WriteDirectoryAndHeader()){
+		std::cout << "Could not write vault to file!" << std::endl;
 		return false;
+	}
 	
 	return true;
 }
@@ -484,283 +889,531 @@ void DisplayHelpMessage(){
 	std::cout << std::flush;
 }
 
-std::string SecretCreateMenu(Vault& v,Identity& i){
-	std::cout << "Enter secret name: ";
-	std::string name;
-	std::getline(std::cin,name);
-	TruncateString(name);
+const char* IllegalCharSet = "/\\?\"':<>|$";
+
+bool LegalName(const SecretString& name){
+	if (name.size()>127) return false;
 	
-	if (name.empty()) return {};
-	
-	if (i.SecretExists(name)){
-		return "Secret '"+name+"' already exists!";
+	const char* it = &IllegalCharSet[0];
+	while (*it!=0){
+		if (name.find(*it)!=std::string::npos)
+			return false;
+		++it;
 	}
 	
-	u32 l = 0;
-	
-	while (l==0){
-		std::cout << "Enter secret length (default 24): ";
-		if (!ReadStdInNumber(l)){
-			l = 0;
-			std::cout << "Could not parse number!" << std::endl;
-		} else if (l>=10000){
-			l = 0;
-			std::cout << "Secret length too big!" << std::endl;
-		} else if (l==0){
-			// set to default if no number is entered
-			l = 24;
-		}
-	}
-	
-	Secret s{};
-	s.name = name;
-	s.genTime = GetTime();
-	s.options = {l};
-	
-	i.AddSecret(s);
-	v.changed = true;
-	
-	return "Secret created successfully.";
+	return true;
 }
 
-std::string SecretMenu(Vault& v,Identity& id,Secret& secret){
-	u8 c;
-	std::string msg = {};
+void PrintSize(u64 size){
+	std::stringstream ss{};
+	ss << std::setfill('0');
+	
+	if (size<1024){
+		ss << size << " B";
+	} else if (size<1024*1024){
+		ss << size/1024 << '.' << std::setw(2) << ((size%1024)*100)/1024 << " KB";
+	} else if (size<1024*1024*1024){
+		ss << size/(1024*1024) << '.' << std::setw(2) << ((size%(1024*1024))*100)/(1024*1024) << " MB";
+	} else {
+		ss << size/(1024*1024*1024) << '.' << std::setw(2) << ((size%(1024*1024*1024))*100)/(1024*1024*1024) << " GB";
+	}
+	
+	std::cout << ss.str();
+}
+
+std::string FileMenu(Vault& v,FileDescriptor* file){
+	FilePointer fp = v.GetFile(*file);
+	if (fp==nullptr){
+		return "File corrupted!";
+	}
+	
+	u8 key;
 	bool show = false;
-	bool copied = false;
+	bool hasCopied = false;
+	std::string msg = {};
+	Secret secret{};
+	if (file->type==FileType::Secret){
+		fp->readHead = 0;
+		u32 length = fp->ReadU32();
+		secret = {SecretType::Service,file->genTime,{length}};
+	}
+	
 	while (true){
 		ClearConsole();
-		std::cout << "Secret Menu\n";
-		DisplayKeyColors(secret.key);
+		
+		std::cout << "File Menu\n";
+		std::cout << file->name << '\n';
+		PrintSize(file->location.size+FILE_HEADER_SIZE);
+		if (gDebug){
+			std::cout << " (" << file->location.size+FILE_HEADER_SIZE << ")";
+		}
+		
 		std::cout << '\n';
-		std::cout << "'" << secret.name << "'\n";
-		PrintDate(secret.genTime);
+		if (gDebug){
+			std::cout << "Offset: " << file->location.offset << '\n';
+		}
+		PrintDateAndTime(file->genTime);
+		std::cout << '\n';
+		std::cout << '\n';
 		
-		if (!show)
-			std::cout << "\n\n\n\n";
-		else
-			std::cout << "\n\n" << secret.GetPass() << "\n\n";
-		
-		if (copied)
-			std::cout << "c: Clear clipboard\n";
-		else
-			std::cout << "c: Copy to clipboard\n";
+		if (show){
+			if (file->type==FileType::File){
+				u64 lines = 0;
+				u64 cols = 0;
+				for (const u8& c : fp->data){
+					std::cout << c;
+					++cols;
+					if (c=='\n'||cols>80){
+						cols = 0;
+						++lines;
+					}
+					if (lines>20){
+						std::cout << "...";
+						break;
+					}
+				}
+			} else if (file->type==FileType::Secret){
+				SecretString pass = secret.GetPass(v.key);
+				std::cout << pass;
+			}
+		}
+		std::cout << "\n\n\n";
 		
 		if (!show)
 			std::cout << "s: Show\n";
 		else
 			std::cout << "s: Hide\n";
-		std::cout << "d: Delete secret\n";
+		
+		std::cout << "e: Export file\n";
+		if (!hasCopied)
+			std::cout << "c: Copy to clipboard\n";
+		else
+			std::cout << "c: Clear clipboard\n";
 		std::cout << "q: Back\n";
 		
-		if (!msg.empty())
-			std::cout << '\n' << msg;
-		msg = {};
+		std::cout << '\n' << msg << '\n';
 		std::cout << std::endl;
 		
-		c = GetKey();
+		key = GetKey();
 		
-		if (c=='q'||c==3||c==27){
+		if (key=='q'||key==3||key==27||key==' '||key=='\n'){
 			break;
-		} else if (c=='c'){
-			if (copied){
-				ClearClipboard();
-				msg = "Clipboard cleared.";
-			} else {
-				SetClipboard(secret.GetPass());
-				msg = "Copied to clipboard.";
-			}
-			copied = !copied;
-		} else if (c=='s'){
+		} else if (key=='s'){
 			show = !show;
-		} else if (c=='d'){
-			std::cout << "Delete secret '"+secret.name+"'? Y/N " << std::flush;
+		} else if (key=='e'){
+			std::cout << "Are you sure you wish to export? Y/N " << std::flush;
 			auto answer = GetYesNoAnswer();
+			if (answer!=YesNoAnswer::Yes) continue;
 			std::cout << std::endl;
-			if (answer==YesNoAnswer::Yes){
-				id.DeleteSecret(secret.name);
-				v.changed = true;
-				return "Secret '"+secret.name+"' deleted.\n";
-			}
-		}
-	}
-	
-	return {};
-}
-
-std::string IdentityMenu(Vault& v,Identity& id){
-	u8 c;
-	std::string msg = {};
-	while (true){
-		ClearConsole();
-		std::cout << "Identity Menu\n";
-		DisplayKeyColors(id.key);
-		std::cout << '\n';
-		std::cout << "'" << id.name << "'\n";
-		PrintDate(id.genTime);
-		std::cout << "\n\n";
-		
-		if (!id.secrets.empty()){
-			std::cout << "Secrets:\n";
-			std::cout << std::setfill(' ');
-			size_t nameJust = id.GetSecretNameJust()+6;
-			size_t i=0;
-			for (const auto& [name,s] : id.secrets){
-				std::cout << (i+1)%10 << ": " << name << std::setw(nameJust-name.size()) << s.options.length << '\n';
-				++i;
-				if (i==10) break;
-			}
-		}
-		
-		std::cout << "\n";
-		std::cout << "s: Add secret\n";
-		std::cout << "d: Delete identity\n";
-		std::cout << "q: Back\n";
-		
-		if (!msg.empty())
-			std::cout << '\n' << msg << '\n';
-		std::cout << std::endl;
-		
-		c = GetKey();
-		
-		if (c=='q'||c==3||c==27){
-			break;
-		} else if (c=='s'){
-			msg = SecretCreateMenu(v,id);
-		} else if (c=='d'){
-			std::cout << "Delete identity '"+id.name+"'? Y/N " << std::flush;
-			auto answer = GetYesNoAnswer();
-			std::cout << std::endl;
-			if (answer==YesNoAnswer::Yes){
-				v.DeleteIdentity(id.name);
-				return "Identity '"+id.name+"' deleted.\n";
-			}
-		} else if (c>='0'&&c<='9'){
-			s32 selectIndex = c-'1';
-			if (selectIndex<0) selectIndex += 10;
 			
-			std::string name = id.GetSecretNameFromIndex(selectIndex);
-			if (name.empty()){
+			std::string path = {};
+			std::cout << "Enter path to export to (default " << file->name << "): " << std::flush;
+			std::getline(std::cin,path);
+			std::error_code ec;
+			
+			TruncateString(path);
+			if (path.empty()){
+				path = file->name;
+			}
+			
+			if (fs::exists(path,ec)){
+				std::cout << "Path already exists! Overwrite? Y/N " << std::flush;
+				auto answer = GetYesNoAnswer();
+				if (answer!=YesNoAnswer::Yes){
+					continue;
+				}
+			}
+			
+			std::ofstream outFile{path,std::ios::out|std::ios::binary|std::ios::trunc};
+			if (!outFile){
+				msg = "Could not write to path!";
 				continue;
 			}
-			msg = SecretMenu(v,id,id.secrets.at(name));
+			
+			if (file->type==FileType::Secret){
+				SecretString pass = secret.GetPass(v.key);
+				outFile.write(pass.data(),pass.size());
+			} else {
+				outFile.write((char*)fp->data.data(),fp->data.size());
+			}
+			
+			msg = "File exported to '"+path +"'.";
+		} else if (key=='c'){
+			if (!hasCopied){
+				if (fp->data.size()>2048){
+					std::cout << "This file is large. Are you sure you want to copy? Y/N " << std::flush;
+					auto answer = GetYesNoAnswer();
+					if (answer!=YesNoAnswer::Yes) continue;
+				}
+				
+				if (file->type==FileType::Secret){
+					SecretString pass = secret.GetPass(v.key);
+					SetClipboard(pass);
+				} else {
+					SecretString str{};
+					for (const auto& c : fp->data){
+						str.push_back(c);
+					}
+					SetClipboard(str);
+				}
+				
+				msg = "Copied to clipboard.";
+			} else {
+				ClearClipboard();
+				msg = "Clipboard cleared.";
+			}
+			
+			hasCopied = !hasCopied;
 		}
 	}
+	
 	return {};
 }
 
-std::string IdentityCreateMenu(Vault& v){
-	std::cout << "Enter identity name: ";
-	std::string name;
+std::string DirectoryCreateMenu(Vault& v){
+	SecretString name;
+	
+	std::cout << "Enter directory name: " << std::flush;
 	std::getline(std::cin,name);
+	std::cout << std::endl;
 	
 	TruncateString(name);
+	if (!LegalName(name)) return "Illegal characters in name '"+name+"'!";
 	if (name.empty()) return {};
 	
-	if (v.IdentityExists(name)){
-		return "Identity '"+name+"' already exists!";
+	if (v.currentDir->NameIsTaken(name)){
+		return "'"+name+"' is already taken!";
 	}
 	
-	Identity id{};
-	id.name = name;
-	id.genTime = GetTime();
-	id.secrets = {};
-	
-	v.AddIdentity(id);
-	return "Identity created successfully.";
+	v.AddDir(name);
+	return "Created directory '"+name+"/' successfully.";
 }
 
-std::string TrySaveVault(Vault& v){
-	std::cout << "Save changes? Y/N " << std::flush;
-	auto answer = GetYesNoAnswer();
+std::string FileCreateMenu(Vault& v){
+	ClearConsole();
+	
+	std::cout << "Select file type.\n\n";
+	std::cout << "s: Randomly generated secret\n";
+	std::cout << "f: Import file from disk\n";
+	std::cout << "c: Enter a short string\n";
+	std::cout << "q: Cancel\n";
 	std::cout << std::endl;
-	if (answer!=YesNoAnswer::Yes){
-		return "Canceled save.";
+	
+	File file = {};
+	u8 choice;
+	bool chosen = false;
+	while (!chosen){
+		choice = GetKey();
+		switch (choice){
+			case 's':
+			case 'f':
+			case 'c':
+				chosen = true;
+				break;
+			case 'q':
+			case 3:
+			case 27:
+				return {};
+		}
+	}
+	
+	SecretString name;
+	std::string path;
+	
+	if (choice=='s'){
+		std::cout << "Enter name of secret to create: " << std::flush;
+	} else if (choice=='c'){
+		std::cout << "Enter name of file to create: " << std::flush;
+	} else if (choice=='f'){
+		std::cout << "Enter path of file to import: " << std::flush;
+	}
+	std::getline(std::cin,name);
+	TruncateString(name);
+	
+	if (choice=='f'){
+		std::error_code ec;
+		path = name;
+		auto filename = fs::path(path).filename();
+		name = (SecretString)filename.string();
+	}
+	
+	if (!LegalName(name)) return "Illegal characters in name '"+name+"'!";
+	if (name.empty()) return {};
+	
+	if (v.currentDir->NameIsTaken(name)){
+		return "Name '"+name+"' is already taken!";
+	}
+	
+	FileDescriptor fileDesc = {};
+	fileDesc.name = name;
+	
+	if (choice=='s'){
+		fileDesc.type = FileType::Secret;
+		u32 size = 0;
+		while (size==0){
+			std::cout << "Enter secret length (default 24): ";
+			if (!ReadStdInNumber(size)){
+				size = 0;
+				std::cout << "Could not parse number!" << std::endl;
+			} else if (size>=10000){
+				size = 0;
+				std::cout << "Secret length too big!" << std::endl;
+			} else if (size==0){
+				// set to default if no number is entered
+				size = 24;
+			}
+		}
+		
+		file.data = {};
+		file.WriteU32(size);
+		v.AddFile(file,fileDesc);
+	} else if (choice=='f'){
+		fileDesc.type = FileType::File;
+		if (path.empty()) return {};
+		
+		std::error_code ec;
+		if (!fs::exists(path,ec)){
+			return "Path doesn't exist!";
+		}
+		
+		{
+			std::fstream importFile{path,std::ios::in|std::ios::binary};
+			if (!importFile){
+				return "Cannot read file!";
+			}
+			std::error_code err;
+			size_t size = fs::file_size(path,err);
+			file.data.resize(size);
+			importFile.read((char*)file.data.data(),size);
+		}
+		
+		v.AddFile(file,fileDesc);
+	} else if (choice=='c'){
+		fileDesc.type = FileType::File;
+		SecretString str = {};
+		std::cout << "Enter string: " << std::flush;
+		std::getline(std::cin,str);
+		std::cout << std::endl;
+		
+		file.data.reserve(str.size());
+		for (const auto& c : str){
+			file.data.push_back(c);
+		}
+		
+		v.AddFile(file,fileDesc);
+	} else {
+		return {};
 	}
 	
 	
-	if (!SaveVault(v)){
-		return "Could not save vault!";
+	return "Created file '"+name+"' successfully.";
+}
+
+std::string DirectoryDeleteMenu(Vault& v,Directory& delDir){
+	std::cout << "Delete directory '" << delDir.name << "' recursively? Y/N " << std::flush;
+	auto answer = GetYesNoAnswer();
+	if (answer!=YesNoAnswer::Yes) return {};
+	
+	SecretString nameCopy = delDir.name;
+	v.DeleteDir(delDir);
+	return "Directory '"+nameCopy+"' deleted successfully";
+}
+
+std::string FileDeleteMenu(Vault& v,FileDescriptor& delFile){
+	std::cout << "Delete file '" << delFile.name << "'? Y/N " << std::flush;
+	auto answer = GetYesNoAnswer();
+	if (answer!=YesNoAnswer::Yes) return {};
+	
+	SecretString nameCopy = delFile.name;
+	v.DeleteFile(delFile);
+	return "File '"+nameCopy+"' deleted successfully";
+}
+
+Directory* GetDirFromList(Directory* currDir,size_t select){
+	if (select==0) return currDir->parent;
+	if (select>=currDir->dirs.size()+1) return nullptr;
+	
+	select -= 1;
+	u64 c = 0;
+	for (auto& dir : currDir->dirs){
+		if (c==select){
+			return &dir;
+		}
+		++c;
 	}
-	return "Saved successfully.";
+	return nullptr;
+}
+
+FileDescriptor* GetFileFromList(Directory* currDir,size_t select){
+	if (select<currDir->dirs.size()+1) return nullptr;
+	
+	select -= currDir->dirs.size()+1;
+	if (select>=currDir->files.size()) return nullptr;
+	
+	u64 c = 0;
+	for (auto& file : currDir->files){
+		if (c==select){
+			return &file;
+		}
+		++c;
+	}
+	return nullptr;
 }
 
 void VaultMenu(Vault& v){
 	u8 c;
 	std::string msg = {};
 	
-	size_t pageIndex = 0;
+	size_t selectIndex = 1;
+	size_t itemCount;
+	auto*& currDir = v.currentDir;
+	Directory* delDir = nullptr;
+	FileDescriptor* selectFile = nullptr;
 	while (true){
-		size_t idCount = v.identities.size();
 		ClearConsole();
 		std::cout << "Vault Menu\n";
 		DisplayKeyColors(v.key);
 		std::cout << "\n\n";
 		
-		if (!v.identities.empty()){
-			std::cout << "Identities:\n";
-			auto idIt = v.identities.begin();
-			for (size_t i=0;i<pageIndex*10;++i)
-				++idIt;
-			
-			for (size_t i=0;i<10;++i){
-				if (idIt==v.identities.end())
-					break;
-				std::cout << (i+1)%10 << ": " << idIt->first << '\n';
-				++idIt;
-			}
-			if (idCount>10){
-				std::cout << "+/-: Next/previous page\n";
-				std::cout << "Page " << pageIndex+1 << '\n';
-			}
+		itemCount = 0;
+		
+		DirTextStyle();
+		if (itemCount==selectIndex)
+			InvertTextStyle();
+		
+		if (!v.AtRoot()){
+			std::cout << "..\n";
+		} else {
+			std::cout << "\n";
 		}
+		ResetTextStyle();
+		++itemCount;
+		std::cout << std::setfill(' ');
+		size_t justSize;
+		size_t biggestName = std::max(currDir->GetBiggestNameSize()+12,24ULL);
+		for (const auto& subdir : currDir->dirs){
+			DirTextStyle();
+			if (itemCount==selectIndex)
+				InvertTextStyle();
+			justSize = biggestName-(subdir.name.size()+1);
+			if (subdir.recursiveSize>=1024) ++justSize;
+			std::cout << subdir.name << '/' << std::setw(justSize);
+			PrintSize(subdir.recursiveSize);
+			std::cout << '\n';
+			ResetTextStyle();
+			++itemCount;
+		}
+		
+		for (const auto& file : currDir->files){
+			if (file.type==FileType::Secret)
+				SecretTextStyle();
+			if (itemCount==selectIndex)
+				InvertTextStyle();
+			justSize = biggestName-file.name.size();
+			if (file.location.size+FILE_HEADER_SIZE>=1024) ++justSize;
+			std::cout << file.name << std::setw(justSize);
+			if (file.type!=FileType::Secret)
+				PrintSize(file.location.size+FILE_HEADER_SIZE);
+			else {
+				// read the length of the password instead of its size in bytes
+				std::stringstream ss{};
+				auto fp = v.GetFile(file);
+				if (!fp){
+					ss << "? L";
+				} else {
+					u32 size = fp->ReadU32();
+					ss << size << " L";
+				}
+				std::cout << ss.str();
+			}
+				
+			std::cout << '\n';
+			ResetTextStyle();
+			++itemCount;
+		}
+		
+		selectFile = GetFileFromList(currDir,selectIndex);
+		
 		std::cout << '\n';
+		std::cout << v.GetPath() << "\n\n";
 		
-		std::cout << "i: New identity\n";
-		if (v.changed)
-			std::cout << "s: Save changes\n";
+		std::cout << "d: New directory\n";
+		std::cout << "f: New file\n";
+		delDir = nullptr;
+		if (selectIndex!=0){
+			delDir = GetDirFromList(currDir,selectIndex);
+			
+			if (delDir!=nullptr)
+				std::cout << "r: Remove directory\n";
+			else if (selectFile!=nullptr)
+				std::cout << "r: Remove file\n";
+		}
 		std::cout << "q: Quit\n";
-		if (!msg.empty())
+		if (!msg.empty()){
 			std::cout << '\n' << msg << '\n';
+			msg.clear();
+		}
 		std::cout << std::endl;
-		
 		
 		c = GetKey();
 		
-		if (c=='q'||c==3||c==27){
-			if (!v.changed)
-				break;
-			
-			std::cout << "WARNING: You have unsaved changes.\n";
-			std::cout << "Discard changes? Y/N " << std::flush;
-			auto answer = GetYesNoAnswer();
-			if (answer==YesNoAnswer::Yes){
-				std::cout << std::endl;
-				break;
+		if (c=='q'||c==3){
+			break;
+		} else if (c==27&&!v.AtRoot()){
+			currDir = currDir->parent;
+		} else if (c=='j'){
+			++selectIndex;
+			selectIndex %= itemCount;
+		} else if (c=='k'){
+			if (v.AtRoot()&&selectIndex==1){
+				selectIndex = itemCount-1;
+			} else {
+				--selectIndex;
+				selectIndex += itemCount;
+				selectIndex %= itemCount;
 			}
-		} else if (c=='+'||c=='='){
-			++pageIndex;
-			pageIndex %= (idCount/10+1);
-		} else if (c=='-'||c=='_'){
-			--pageIndex;
-			pageIndex %= (idCount/10+1);
-		} else if (c=='s'&&v.changed){
-			msg = TrySaveVault(v);
+		} else if (c=='u'){
+			selectIndex = itemCount-1;
 		} else if (c=='i'){
-			msg = IdentityCreateMenu(v);
-		} else if (c>='0'&&c<='9'){
-			s32 selectIndex = c-'1';
-			if (selectIndex<0) selectIndex += 10;
-			
-			selectIndex += pageIndex*10;
-			
-			std::string name = v.GetIdentityNameFromIndex(selectIndex);
-			if (name.empty()){
-				continue;
+			selectIndex = 0;
+		} else if (c=='d'){
+			msg = DirectoryCreateMenu(v);
+		} else if (c=='f'){
+			msg = FileCreateMenu(v);
+		} else if (c=='r'){
+			if (delDir!=nullptr){
+				msg = DirectoryDeleteMenu(v,*delDir);
+				itemCount -= 1;
+				selectIndex %= itemCount;
+			} else if (selectFile!=nullptr){
+				msg = FileDeleteMenu(v,*selectFile);
+				itemCount -= 1;
+				selectIndex %= itemCount;
 			}
-			msg = IdentityMenu(v,v.identities.at(name));
+		} else if (c==' '||c=='\n'||c=='\r'){
+			if (selectIndex<currDir->dirs.size()+1){
+				Directory* newDir = GetDirFromList(currDir,selectIndex);
+				if (newDir!=nullptr){
+					currDir = newDir;
+					selectIndex = 0;
+				}
+			} else {
+				// opened a file
+				msg = FileMenu(v,selectFile);
+			}
+		} else if (c=='D'){
+			if (!gDebug)
+				msg = "Debug mode enabled.";
+			else
+				msg = "Debug mode disabled.";
+			
+			gDebug = !gDebug;
 		}
+		
+		if (v.AtRoot()&&selectIndex==0)
+			selectIndex = 1;
 	}
+	
+	ClearConsole();
 	std::cout << "Quitting..." << std::endl;
 }
-

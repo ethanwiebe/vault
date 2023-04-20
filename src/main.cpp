@@ -1,8 +1,10 @@
 #include "plat.h"
 #include "vault.h"
 
+bool gDebug = false;
+
 int main(int argc,char** argv){
-	//std::cout.sync_with_stdio(false);
+	std::cout.sync_with_stdio(false);
 	PlatInit();
 	
 	Vault v;
@@ -10,6 +12,7 @@ int main(int argc,char** argv){
 
 	if (argc==1){
 		if (!CreateVault(v)){
+			std::cout << "Could not create vault!" << std::endl;
 			exit(1);
 		}
 	} else {
@@ -18,8 +21,7 @@ int main(int argc,char** argv){
 			DisplayHelpMessage();
 			exit(0);
 		} else {
-			v.path = arg;
-			if (!LoadVault(v)){
+			if (!LoadVault(v,arg)){
 				exit(1);
 			}
 		}

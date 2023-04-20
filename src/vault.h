@@ -6,6 +6,10 @@
 #include <cstring>
 #include <map>
 #include <array>
+#include <memory>
+#include <vector>
+#include <list>
+#include <fstream>
 
 #include "sha3/sha3.h"
 
@@ -16,20 +20,11 @@
 #define SUB_HASH_ROUNDS 8
 #define MINOR_HASH_ROUNDS 256
 
-// SHA-2 init hash constants
-#define ENCRYPT_KEY_CONSTANT 0xbb67ae856a09e667ULL
-#define COLOR_KEY_CONSTANT 0xa54ff53a3c6ef372ULL
-
 #define ZERO_VECTOR_SIZE 64
-#define VERSION_NUMBER 1
+#define VERSION_NUMBER 0
 
-
-class SecretString : public std::string {
-public:
-	~SecretString(){
-		memset(this->data(),0,this->size());
-	}
-};
+constexpr u8 VAULT_MAGIC[] = {'E','V','\x00','\x01'};
+constexpr u8 FILE_MAGIC[] = {'E','F','\x05','\x04'};
 
 typedef std::array<u8,HASH_BYTES> HashResult;
 const std::string passwordChars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ123456789!?-_@%";
@@ -103,6 +98,16 @@ struct Sha3State {
 		Rehash(1);
 	}
 	
+	inline void UpdateU32(u32 u){
+		sha3_Update(&ctx,&u,sizeof(u32));
+		Rehash(1);
+	}
+	
+	inline void UpdateU16(u16 u){
+		sha3_Update(&ctx,&u,sizeof(u16));
+		Rehash(1);
+	}
+	
 	inline void UpdatePassOptions(const PassOptions& ops){
 		static_assert(sizeof(ops)==sizeof(u32));
 		sha3_Update(&ctx,&ops.length,sizeof(ops.length));
@@ -124,49 +129,137 @@ enum class SecretType : u32 {
 struct Secret {
 	SecretType type;
 	u64 genTime;
-	std::string name;
 	PassOptions options = {};
-	Sha3State key;
 	
-	void Open(Sha3State idKey);
-	SecretString GetPass();
+	SecretString GetPass(Sha3State key);
 };
 
-struct Identity {
-	std::string name;
-	u64 genTime;
-	Sha3State key;
-	std::map<std::string,Secret> secrets;
+enum class FileType : u16 {
+	File = 0,
+	Secret
+};
+
+struct File {
+	std::vector<u8> data;
+	u64 readHead;
 	
-	inline bool SecretExists(const std::string& name){
-		return secrets.contains(name);
+	File() : data() {}
+	~File(){
+		std::fill(data.begin(),data.end(),0);
 	}
 	
-	void Open(Sha3State masterKey);
-	std::string GetSecretNameFromIndex(size_t index);
-	size_t GetSecretNameJust() const;
-	void AddSecret(Secret& s);
-	void DeleteSecret(const std::string& name);
+	void WriteU64(u64);
+	u64 ReadU64();
+	
+	void WriteU32(u32);
+	u32 ReadU32();
+	
+	File(const File&) = delete;
+	File(File&&) = delete;
+};
+
+struct FileLocation {
+	u64 offset;
+	u64 size;
+};
+
+struct FileDescriptor {
+	SecretString name;
+	u32 salt;
+	FileType type;
+	u64 genTime;
+	FileLocation location;
+};
+
+struct Directory {
+	SecretString name = {};
+	std::list<Directory> dirs = {};
+	std::list<FileDescriptor> files = {};
+	
+	Directory* parent = nullptr;
+	size_t recursiveSize = 0;
+	
+	void AddSize(s64);
+	u64 GetBiggestNameSize() const;
+	
+	void AddFile(const FileDescriptor& header);
+	void DeleteFile(FileDescriptor& delFile);
+	void AddDir(const SecretString&);
+	void DeleteDir(Directory& delDir);
+	void ShrinkFilesAfter(u64,u64);
+	u64 CountFiles() const;
+	bool NameIsTaken(const SecretString&) const;
+};
+
+struct LocationDirectory {
+	Directory root = {};
+};
+
+typedef std::unique_ptr<File> FilePointer;
+
+// magic + version + salt
+constexpr u64 PLAIN_HEADER_SIZE = sizeof(FILE_MAGIC)+sizeof(u32)+sizeof(u64);
+// zeros + locdir size
+constexpr u64 VAULT_HEADER_SIZE = sizeof(u8)*ZERO_VECTOR_SIZE+sizeof(u64);
+constexpr u64 FILE_HEADER_SIZE = sizeof(FILE_MAGIC);
+
+constexpr s64 PLAIN_HEADER_OFFSET = -PLAIN_HEADER_SIZE-VAULT_HEADER_SIZE;
+constexpr s64 VAULT_HEADER_OFFSET = -VAULT_HEADER_SIZE;
+constexpr u64 MIN_LOC_DIR_SIZE = sizeof(u64)*2;
+constexpr u64 MIN_FILE_SIZE = MIN_LOC_DIR_SIZE+VAULT_HEADER_SIZE+PLAIN_HEADER_SIZE;
+
+struct PlainHeader {
+	u8 magic[sizeof(FILE_MAGIC)];
+	u32 version;
+	u64 salt;
+};
+
+struct VaultHeader {
+	u8 zeroes[ZERO_VECTOR_SIZE];
+	u64 locDirSize;
 };
 
 struct Vault {
 	Sha3State key;
-	std::map<std::string,Identity> identities;
-	std::string path;
+	Sha3State encryptKey;
+	std::string vaultPath;
+	std::fstream vaultFile;
 	u64 salt;
+	
+	u64 fileBlockEnd = 0;
+	LocationDirectory directory;
+	Directory* currentDir;
 	
 	bool changed = false;
 	
-	bool Encrypt(std::ofstream& out,Sha3State key);
-	bool Decrypt(std::ifstream& in,Sha3State key,bool& decrypted);
-	void AddIdentity(Identity& id);
-	void DeleteIdentity(const std::string& name);
-	bool IdentityExists(const std::string& name) const;
-	std::string GetIdentityNameFromIndex(size_t index) const;
+	void SetKey(Sha3State& k);
+	void SetFile(std::fstream&&,const std::string& path);
+	
+	FilePointer GetFile(const FileDescriptor&);
+	void AddFile(const File& file,FileDescriptor& header);
+	void DeleteFileRaw(FileDescriptor& header);
+	void DeleteFile(FileDescriptor& header);
+	
+	void AddDir(const SecretString& name);
+	void DeleteDir(Directory& delDir);
+	void DeleteRecursive(Directory& delDir);
+	
+	// called when testing out password
+	bool TryDecrypt(Sha3State& k);
+	
+	// called after TryDecrypt
+	bool OpenFromFile();
+	
+	bool WriteFileAtEnd(const File& file,const FileDescriptor& desc);
+	bool WriteDirectoryAndHeader();
+	void PostWrite(u64 locDirSize);
+	
+	bool AtRoot() const;
+	SecretString GetPath() const;
 };
 
 
 void DisplayHelpMessage();
 bool CreateVault(Vault& v);
-bool LoadVault(Vault& v);
+bool LoadVault(Vault& v,const std::string& path);
 void VaultMenu(Vault& v);

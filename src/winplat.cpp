@@ -16,7 +16,7 @@ u8 GetKey(){
 	return c;
 }
 
-void PasswordEntry(std::string& pass){
+void PasswordEntry(SecretString& pass){
 	u8 c = 0;
 	pass = {};
 	while (true){
@@ -58,7 +58,7 @@ void WindowsInit(){
 	consoleHwnd = FindWindow(NULL,PROGRAM_NAME);
 }
 
-void SetClipboard(const std::string& str){
+void SetClipboard(const SecretString& str){
 	OpenClipboard(consoleHwnd);
 	EmptyClipboard();
 	
@@ -80,6 +80,25 @@ void SetClipboard(const std::string& str){
 
 void ClearClipboard(){
 	OpenClipboard(consoleHwnd);
+	
+	HANDLE hData = GetClipboardData(CF_TEXT);
+	if (hData==NULL){
+		EmptyClipboard();
+		CloseClipboard();
+		return;
+	}
+	
+	u8* pszText = (u8*)GlobalLock(hData);
+	if (pszText==NULL){
+		EmptyClipboard();
+		CloseClipboard();
+		return;
+	}
+	
+	size_t size = strnlen((const char*)pszText,65536);
+	memset(pszText,0,size);
+	GlobalUnlock(hData);
+	
 	EmptyClipboard();
 	CloseClipboard();
 }

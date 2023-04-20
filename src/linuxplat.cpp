@@ -47,7 +47,7 @@ u8 GetKey(){
 	return c;
 }
 
-void PasswordEntry(std::string& pass){
+void PasswordEntry(SecretString& pass){
 	u8 c = 0;
 	pass = {};
 	while (true){
@@ -74,7 +74,7 @@ bool GenerateSalt(u64& salt){
 	return true;
 }
 
-void SetClipboard(const std::string& str){
+void SetClipboard(const SecretString& str){
 	clipManager->set_data(str.data(),str.size());
 }
 
