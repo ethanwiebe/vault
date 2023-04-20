@@ -163,12 +163,16 @@ struct FileLocation {
 	u64 size;
 };
 
+struct Directory;
+
 struct FileDescriptor {
 	SecretString name;
 	u32 salt;
 	FileType type;
 	u64 genTime;
 	FileLocation location;
+	
+	Directory* parent = nullptr;
 };
 
 struct Directory {
@@ -179,16 +183,21 @@ struct Directory {
 	Directory* parent = nullptr;
 	size_t recursiveSize = 0;
 	
-	void AddSize(s64);
-	u64 GetBiggestNameSize() const;
-	
-	void AddFile(const FileDescriptor& header);
+	void AddFile(FileDescriptor desc);
 	void DeleteFile(FileDescriptor& delFile);
-	void AddDir(const SecretString&);
+	void CreateDir(const SecretString&);
 	void DeleteDir(Directory& delDir);
-	void ShrinkFilesAfter(u64,u64);
 	u64 CountFiles() const;
 	bool NameIsTaken(const SecretString&) const;
+	
+	void AddSize(s64);
+	u64 GetBiggestNameSize() const;
+	void UnlinkDir(Directory&);
+	void LinkDir(Directory&);
+	void UnlinkFile(FileDescriptor&);
+	void LinkFile(FileDescriptor&);
+	void ShrinkFilesAfter(u64,u64);
+	void FixPointers();
 };
 
 struct LocationDirectory {
@@ -240,9 +249,12 @@ struct Vault {
 	void DeleteFileRaw(FileDescriptor& header);
 	void DeleteFile(FileDescriptor& header);
 	
-	void AddDir(const SecretString& name);
+	void CreateDir(const SecretString& name);
 	void DeleteDir(Directory& delDir);
 	void DeleteRecursive(Directory& delDir);
+	
+	void MoveDir(Directory& dir);
+	void MoveFile(FileDescriptor& file);
 	
 	// called when testing out password
 	bool TryDecrypt(Sha3State& k);

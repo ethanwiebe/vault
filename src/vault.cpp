@@ -460,6 +460,17 @@ u64 Directory::GetBiggestNameSize() const {
 	return s;
 }
 
+void Directory::FixPointers(){
+	for (auto& dir : dirs){
+		dir.parent = this;
+		dir.FixPointers();
+	}
+	
+	for (auto& file : files){
+		file.parent = this;
+	}
+}
+
 void Directory::AddSize(s64 size){
 	recursiveSize += size;
 	if (parent){
@@ -467,7 +478,8 @@ void Directory::AddSize(s64 size){
 	}
 }
 
-void Directory::AddFile(const FileDescriptor& desc){
+void Directory::AddFile(FileDescriptor desc){
+	desc.parent = this;
 	files.push_back(desc);
 	AddSize(desc.location.size+FILE_HEADER_SIZE);
 }
@@ -487,11 +499,55 @@ void Directory::DeleteFile(FileDescriptor& delFile){
 	}
 }
 
-void Directory::AddDir(const SecretString& name){
+void Directory::CreateDir(const SecretString& name){
 	Directory d{name};
 	d.parent = this;
 	d.recursiveSize = 0;
 	dirs.push_back(d);
+}
+
+void Directory::UnlinkDir(Directory& subDir){
+	auto it = dirs.begin();
+	for (auto& dir : dirs){
+		if (&dir==&subDir){
+			break;
+		}
+		++it;
+	}
+	
+	if (it!=dirs.end()){
+		AddSize(-it->recursiveSize);
+		dirs.erase(it);
+	}
+}
+
+void Directory::LinkDir(Directory& dirToLink){
+	AddSize(dirToLink.recursiveSize);
+	
+	dirs.push_back(dirToLink);
+	auto& newDir = dirs.back();
+	
+	newDir.parent = this;
+	newDir.FixPointers();
+}
+
+void Directory::UnlinkFile(FileDescriptor& desc){
+	auto it = files.begin();
+	for (auto& file : files){
+		if (&file==&desc){
+			break;
+		}
+		++it;
+	}
+	
+	if (it!=files.end()){
+		AddSize(-(it->location.size+FILE_HEADER_SIZE));
+		files.erase(it);
+	}
+}
+
+void Directory::LinkFile(FileDescriptor& desc){
+	AddFile(desc);
 }
 
 void Directory::ShrinkFilesAfter(u64 offset,u64 amount){
@@ -587,8 +643,8 @@ void Vault::DeleteFile(FileDescriptor& delFile){
 	WriteDirectoryAndHeader();
 }
 
-void Vault::AddDir(const SecretString& name){
-	currentDir->AddDir(name);
+void Vault::CreateDir(const SecretString& name){
+	currentDir->CreateDir(name);
 	WriteDirectoryAndHeader();
 }
 
@@ -618,6 +674,28 @@ void Vault::DeleteDir(Directory& delDir){
 		currentDir->dirs.erase(it);
 	}
 	
+	WriteDirectoryAndHeader();
+}
+
+void Vault::MoveDir(Directory& dir){
+	Directory* d = currentDir;
+	while (d){
+		if (d==&dir){
+			return;
+		}
+		d = d->parent;
+	}
+	
+	Directory* oldParent = dir.parent;
+	currentDir->LinkDir(dir);
+	oldParent->UnlinkDir(dir);
+	WriteDirectoryAndHeader();
+}
+
+void Vault::MoveFile(FileDescriptor& desc){
+	Directory* oldParent = desc.parent;
+	currentDir->LinkFile(desc);
+	oldParent->UnlinkFile(desc);
 	WriteDirectoryAndHeader();
 }
 
@@ -1098,7 +1176,7 @@ std::string DirectoryCreateMenu(Vault& v){
 		return "'"+name+"' is already taken!";
 	}
 	
-	v.AddDir(name);
+	v.CreateDir(name);
 	return "Created directory '"+name+"/' successfully.";
 }
 
@@ -1282,6 +1360,11 @@ void VaultMenu(Vault& v){
 	auto*& currDir = v.currentDir;
 	Directory* delDir = nullptr;
 	FileDescriptor* selectFile = nullptr;
+	
+	bool moving = false;
+	Directory* moveDir = nullptr;
+	FileDescriptor* moveFile = nullptr;
+	
 	while (true){
 		ClearConsole();
 		std::cout << "Vault Menu\n";
@@ -1350,18 +1433,29 @@ void VaultMenu(Vault& v){
 		std::cout << '\n';
 		std::cout << v.GetPath() << "\n\n";
 		
-		std::cout << "d: New directory\n";
-		std::cout << "f: New file\n";
-		delDir = nullptr;
-		if (selectIndex!=0){
-			delDir = GetDirFromList(currDir,selectIndex);
-			
-			if (delDir!=nullptr)
-				std::cout << "r: Remove directory\n";
-			else if (selectFile!=nullptr)
-				std::cout << "r: Remove file\n";
+		if (moving){
+			std::cout << "m: Move here\n";
+			std::cout << "q: Cancel\n";
+		} else {
+			std::cout << "d: New directory\n";
+			std::cout << "f: New file\n";
+			delDir = nullptr;
+			if (selectIndex!=0){
+				delDir = GetDirFromList(currDir,selectIndex);
+				
+				if (delDir!=nullptr){
+					std::cout << "r: Remove directory\n";
+					std::cout << "n: Rename directory\n";
+					std::cout << "m: Move directory\n";
+				} else if (selectFile!=nullptr){
+					std::cout << "r: Remove file\n";
+					std::cout << "n: Rename file\n";
+					std::cout << "m: Move file\n";
+				}
+			}
+			std::cout << "q: Quit\n";
 		}
-		std::cout << "q: Quit\n";
+		
 		if (!msg.empty()){
 			std::cout << '\n' << msg << '\n';
 			msg.clear();
@@ -1413,6 +1507,49 @@ void VaultMenu(Vault& v){
 			} else {
 				// opened a file
 				msg = FileMenu(v,selectFile);
+			}
+		} else if (c=='n'){
+			if (delDir==nullptr&&selectFile==nullptr) 
+				continue;
+			
+			SecretString name{};
+			std::cout << "Enter new name: " << std::flush;
+			std::getline(std::cin,name);
+			
+			TruncateString(name);
+			if (!LegalName(name)){
+				msg = "Illegal characters in name '"+name+"'!";
+				continue;
+			}
+			
+			if (name.empty()) continue;
+			
+			if (delDir!=nullptr){
+				delDir->name = name;
+			} else {
+				selectFile->name = name;
+			}
+			
+			v.WriteDirectoryAndHeader();
+		} else if (c=='m'){
+			if (!moving){
+				if (delDir==nullptr&&selectFile==nullptr)
+					continue;
+				
+				moving = true;
+				if (delDir!=nullptr)
+					moveDir = delDir;
+				else
+					moveFile = selectFile;
+			} else {
+				moving = false;
+				if (moveDir!=nullptr){
+					v.MoveDir(*moveDir);
+					moveDir = nullptr;
+				} else {
+					v.MoveFile(*moveFile);
+					moveFile = nullptr;
+				}
 			}
 		} else if (c=='D'){
 			if (!gDebug)
