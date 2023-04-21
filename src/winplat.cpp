@@ -103,8 +103,8 @@ void ClearClipboard(){
 	CloseClipboard();
 }
 
-bool GenerateSalt(u64& salt){
-	return CryptGenRandom(hCryptProv,sizeof(u64),(u8*)&salt);
+bool GenerateRandomBytes(u8* b,u64 count){
+	return CryptGenRandom(hCryptProv,count,b);
 }
 
 void PlatInit(){

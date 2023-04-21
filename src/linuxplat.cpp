@@ -68,9 +68,9 @@ void PasswordEntry(SecretString& pass){
 	}
 }
 
-bool GenerateSalt(u64& salt){
+bool GenerateRandomBytes(u8* b,u64 count){
 	std::ifstream r{"/dev/random",std::ios::binary};
-	r.read((char*)&salt,sizeof(u64));
+	r.read((char*)&b,count);
 	return true;
 }
 

@@ -21,7 +21,10 @@
 #define MINOR_HASH_ROUNDS 256
 
 #define ZERO_VECTOR_SIZE 64
+#define FILE_ZERO_VECTOR_SIZE 8
 #define VERSION_NUMBER 0
+#define EXT_ENCRYPT_EXTENSION "venc"
+#define EXT_DECRYPT_EXTENSION "vdec"
 
 constexpr u8 VAULT_MAGIC[] = {'E','V','\x00','\x01'};
 constexpr u8 FILE_MAGIC[] = {'E','F','\x05','\x04'};

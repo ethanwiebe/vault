@@ -4,6 +4,7 @@
 #include <time.h>
 #include <iostream>
 #include <iomanip>
+#include <fstream>
 
 #include "types.h"
 
@@ -17,7 +18,12 @@ enum class YesNoAnswer : u8 {
 	No
 };
 
-bool GenerateSalt(u64& salt);
+bool GenerateRandomBytes(u8* b,u64 count);
+
+inline bool GenerateSalt(u64& salt){
+	return GenerateRandomBytes((u8*)&salt,sizeof(u64));
+}
+
 void SetClipboard(const SecretString& str);
 void ClearClipboard();
 u8 GetKey();
@@ -26,6 +32,11 @@ void PasswordEntry(SecretString& pass);
 
 inline u64 GetTime(){
 	return time(NULL);
+}
+
+inline u64 GetFileSize(std::fstream& file){
+	file.seekg(0,std::ios::end);
+	return file.tellg();
 }
 
 inline bool ReadStdInNumber(u32& num){
