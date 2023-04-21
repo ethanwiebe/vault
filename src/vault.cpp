@@ -23,6 +23,9 @@
 #define BYTESWAP64(x) ((((x)&0xFFULL)<<56) | (((x)&0xFF00ULL)<<40) | (((x)&0xFF0000ULL)<<24) | (((x)&0xFF000000ULL)<<8) | \
 					   (((x)&0xFF00000000ULL)>>8) | (((x)&0xFF0000000000ULL)>>24) | (((x)&0xFF000000000000ULL)>>40) | (((x)&0xFF00000000000000ULL)>>56))
 
+#define SHRED_CHUNK_SIZE 64
+#define ENCRYPT_CHUNK_SIZE 64
+
 namespace fs = std::filesystem;
 
 static_assert(BYTESWAP64(BYTESWAP64(LOCDIR_KEY_CONSTANT))==LOCDIR_KEY_CONSTANT);
@@ -54,8 +57,6 @@ Sha3State InitKey(const std::string& pass,u64 salt){
 	return k;
 }
 
-#define SHRED_BYTES_COUNT 64
-
 bool ShredFile(std::fstream& file){
 	u64 size = GetFileSize(file);
 	file.seekp(0);
@@ -63,16 +64,16 @@ bool ShredFile(std::fstream& file){
 	if (!file) return false;
 	
 	u64 i=0;
-	u8 rands[SHRED_BYTES_COUNT];
+	u8 rands[SHRED_CHUNK_SIZE];
 	while (i<size){
-		if (!GenerateRandomBytes((u8*)&rands,SHRED_BYTES_COUNT)) return false;
-		if (size-i<SHRED_BYTES_COUNT){
+		if (!GenerateRandomBytes((u8*)&rands,SHRED_CHUNK_SIZE)) return false;
+		if (size-i<SHRED_CHUNK_SIZE){
 			file.write((const char*)&rands[0],size-i);
 			break;
 		} else {
-			file.write((const char*)&rands[0],SHRED_BYTES_COUNT);
+			file.write((const char*)&rands[0],SHRED_CHUNK_SIZE);
 		}
-		i += SHRED_BYTES_COUNT;
+		i += SHRED_CHUNK_SIZE;
 	}
 	return true;
 }
@@ -857,21 +858,21 @@ bool EncryptExternalFile(Vault& v,std::fstream& inFile,std::fstream& outFile){
 	ctx.Encrypt(&zeroes[0],FILE_ZERO_VECTOR_SIZE);
 	
 	inFile.seekg(0);
-	u8 encryptBuffer[64];
+	u8 encryptBuffer[ENCRYPT_CHUNK_SIZE];
 	u64 i=0;
 	while (i<fileSize){
-		if (fileSize-i<64){
+		if (fileSize-i<ENCRYPT_CHUNK_SIZE){
 			u64 amount = fileSize-i;
 			inFile.read((char*)&encryptBuffer[0],amount);
 			ctx.Encrypt(&encryptBuffer[0],amount);
 		} else {
-			inFile.read((char*)&encryptBuffer[0],64);
-			ctx.Encrypt(&encryptBuffer[0],64);
+			inFile.read((char*)&encryptBuffer[0],ENCRYPT_CHUNK_SIZE);
+			ctx.Encrypt(&encryptBuffer[0],ENCRYPT_CHUNK_SIZE);
 		}
-		i += 64;
+		i += ENCRYPT_CHUNK_SIZE;
 	}
 	
-	memset(&encryptBuffer[0],0,64);
+	memset(&encryptBuffer[0],0,ENCRYPT_CHUNK_SIZE);
 	if (!inFile) return false;
 	if (!outFile) return false;
 	
@@ -910,21 +911,21 @@ bool DecryptExternalFile(Vault& v,std::fstream& encFile,std::fstream& plainFile,
 	plainFile.seekp(0);
 	if (!plainFile) return false;
 	
-	u8 decryptBuffer[64];
+	u8 decryptBuffer[ENCRYPT_CHUNK_SIZE];
 	u64 i=0;
 	while (i<fileSize){
-		if (fileSize-i<64){
+		if (fileSize-i<ENCRYPT_CHUNK_SIZE){
 			u64 amount = fileSize-i;
 			ctx.Decrypt(&decryptBuffer[0],amount);
 			plainFile.write((char*)&decryptBuffer[0],amount);
 		} else {
-			ctx.Decrypt(&decryptBuffer[0],64);
-			plainFile.write((char*)&decryptBuffer[0],64);
+			ctx.Decrypt(&decryptBuffer[0],ENCRYPT_CHUNK_SIZE);
+			plainFile.write((char*)&decryptBuffer[0],ENCRYPT_CHUNK_SIZE);
 		}
-		i += 64;
+		i += ENCRYPT_CHUNK_SIZE;
 	}
 	
-	memset(&decryptBuffer[0],0,64);
+	memset(&decryptBuffer[0],0,ENCRYPT_CHUNK_SIZE);
 	if (!encFile) return false;
 	if (!plainFile) return false;
 	
@@ -1883,5 +1884,4 @@ void VaultMenu(Vault& v){
 	}
 	
 	ClearConsole();
-	std::cout << "Quitting..." << std::endl;
 }
