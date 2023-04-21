@@ -1685,7 +1685,7 @@ void VaultMenu(Vault& v){
 		++itemCount;
 		std::cout << std::setfill(' ');
 		size_t justSize;
-		size_t biggestName = std::max(currDir->GetBiggestNameSize()+12,24ULL);
+		size_t biggestName = std::max(currDir->GetBiggestNameSize()+12,(u64)24ULL);
 		for (const auto& subdir : currDir->dirs){
 			DirTextStyle();
 			if (itemCount==selectIndex)
@@ -1824,6 +1824,11 @@ void VaultMenu(Vault& v){
 			
 			if (name.empty()) continue;
 			
+			if (currDir->NameIsTaken(name)){
+				msg = "Name '"+name+"' is already taken!";
+				continue;
+			}
+			
 			if (delDir!=nullptr){
 				delDir->name = name;
 			} else {
@@ -1844,9 +1849,19 @@ void VaultMenu(Vault& v){
 			} else {
 				moving = false;
 				if (moveDir!=nullptr){
+					if (currDir->NameIsTaken(moveDir->name)){
+						msg = "Path with the name '"+moveDir->name+"' already exists in this directory!";
+						moveDir = nullptr;
+						continue;
+					}
 					v.MoveDir(*moveDir);
 					moveDir = nullptr;
 				} else {
+					if (currDir->NameIsTaken(moveFile->name)){
+						msg = "Path with the name '"+moveFile->name+"' already exists in this directory!";
+						moveFile = nullptr;
+						continue;
+					}
 					v.MoveFile(*moveFile);
 					moveFile = nullptr;
 				}
