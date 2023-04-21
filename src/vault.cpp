@@ -851,8 +851,9 @@ bool EncryptExternalFile(Vault& v,std::fstream& inFile,std::fstream& outFile){
 	fileKey.UpdateU64(fileSalt);
 	
 	u8 zeroes[FILE_ZERO_VECTOR_SIZE];
-	BufferEncryptCtx ctx{outFile,fileKey};
+	memset(&zeroes[0],0,FILE_ZERO_VECTOR_SIZE);
 	
+	BufferEncryptCtx ctx{outFile,fileKey};
 	ctx.Encrypt(&zeroes[0],FILE_ZERO_VECTOR_SIZE);
 	
 	inFile.seekg(0);
