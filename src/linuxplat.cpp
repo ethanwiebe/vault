@@ -69,8 +69,8 @@ void PasswordEntry(SecretString& pass){
 }
 
 bool GenerateRandomBytes(u8* b,u64 count){
-	std::ifstream r{"/dev/random",std::ios::binary};
-	r.read((char*)&b,count);
+	std::ifstream r{"/dev/random",std::ios::binary|std::ios::in};
+	r.read((char*)b,count);
 	return true;
 }
 
