@@ -16,15 +16,19 @@
 #define HASH_BITS 512
 #define HASH_BYTES (HASH_BITS>>3)
 
-#define MASTER_HASH_ROUNDS 200000
 #define SUB_HASH_ROUNDS 8
-#define MINOR_HASH_ROUNDS 256
+#define COLOR_HASH_ROUNDS 8192
 
 #define ZERO_VECTOR_SIZE 64
 #define FILE_ZERO_VECTOR_SIZE 8
 #define VERSION_NUMBER 0
 #define EXT_ENCRYPT_EXTENSION "venc"
 #define EXT_DECRYPT_EXTENSION "vdec"
+
+#define BALLOON_SPACE_COST    2048
+#define BALLOON_TIME_COST        2
+#define BALLOON_DELTA_COST       8
+#define BALLOON_EXTRACT_COST  4096
 
 constexpr u8 VAULT_MAGIC[] = {'E','V','\x00','\x01'};
 constexpr u8 FILE_MAGIC[] = {'E','F','\x05','\x04'};
@@ -91,18 +95,30 @@ struct Sha3State {
 		return *this;
 	}
 	
+	inline void Reset(){
+		sha3_Init(&ctx,HASH_BITS);
+	}
+	
 	inline void UpdateString(const std::string& str){
 		sha3_Update(&ctx,str.data(),str.size());
 		Rehash(1);
 	}
 	
-	inline void UpdateU64(u64 u){
+	inline void RawUpdateU64(u64 u){
 		sha3_Update(&ctx,&u,sizeof(u64));
+	}
+	
+	inline void UpdateU64(u64 u){
+		RawUpdateU64(u);
 		Rehash(1);
 	}
 	
-	inline void UpdateU32(u32 u){
+	inline void RawUpdateU32(u32 u){
 		sha3_Update(&ctx,&u,sizeof(u32));
+	}
+	
+	inline void UpdateU32(u32 u){
+		RawUpdateU32(u);
 		Rehash(1);
 	}
 	
@@ -114,6 +130,15 @@ struct Sha3State {
 	inline void UpdatePassOptions(const PassOptions& ops){
 		static_assert(sizeof(ops)==sizeof(u32));
 		sha3_Update(&ctx,&ops.length,sizeof(ops.length));
+		Rehash(1);
+	}
+	
+	inline void RawUpdateResult(const HashResult& res){
+		sha3_Update(&ctx,&res[0],sizeof(HashResult));
+	}
+	
+	inline void UpdateResult(const HashResult& res){
+		RawUpdateResult(res);
 		Rehash(1);
 	}
 	

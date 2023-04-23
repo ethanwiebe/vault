@@ -34,6 +34,15 @@ static_assert(BYTESWAP16(BYTESWAP16((u16)LOCDIR_KEY_CONSTANT))==(u16)LOCDIR_KEY_
 
 extern bool gDebug;
 
+void PrintHash(const HashResult& res){
+	std::cout << std::setfill('0');
+	for (u64 i=0;i<HASH_BYTES;i++){
+		std::cout << std::hex << std::setw(2) << (int)res[i];
+	}
+	std::cout << std::dec;
+	std::cout << std::setfill(' ');
+}
+
 void TruncateString(std::string& str){
 	while (!str.empty()&&(str.front()==' '||str.front()=='\t')){
 		str.erase(0,1);
@@ -45,16 +54,69 @@ void TruncateString(std::string& str){
 
 Sha3State GenerateKey(Sha3State salted,u64 keyType){
 	salted.UpdateU64(keyType);
-	salted.Rehash(MINOR_HASH_ROUNDS);
+	salted.Rehash(SUB_HASH_ROUNDS);
 	return salted;
 }
 
-Sha3State InitKey(const std::string& pass,u64 salt){
-	Sha3State k{};
-	k.UpdateString(pass);
-	k.UpdateU64(salt);
-	k.Rehash(MASTER_HASH_ROUNDS);
-	return k;
+Sha3State BalloonInitKey(const SecretString& pass,u64 salt){
+	Sha3State stateArray[BALLOON_SPACE_COST];
+	
+	for (u32 i=0;i<BALLOON_SPACE_COST;++i){
+		stateArray[i] = {};
+		stateArray[i].result = {};
+	}
+	
+	u32 counter = 1;
+	
+	// expand
+	stateArray[0].UpdateString(pass);
+	stateArray[0].UpdateU64(salt);
+	
+	for (u32 i=1;i<BALLOON_SPACE_COST;++i){
+		stateArray[i].RawUpdateU32(counter++);
+		stateArray[i].RawUpdateResult(stateArray[i-1].result);
+		stateArray[i].Rehash(2);
+	}
+
+	Sha3State indexState;
+	HashResult copy;
+	
+	// mix
+	for (u32 t=0;t<BALLOON_TIME_COST;++t){
+		for (u32 i=0;i<BALLOON_SPACE_COST;++i){
+			stateArray[i].RawUpdateU32(counter++);
+			stateArray[i].RawUpdateResult(stateArray[(i-1)%BALLOON_SPACE_COST].result);
+			stateArray[i].Rehash(2);
+			
+			for (u32 j=0;j<BALLOON_DELTA_COST;++j){
+				indexState.Reset();
+				indexState.RawUpdateU32(t);
+				indexState.RawUpdateU32(i);
+				indexState.RawUpdateU32(j);
+				indexState.Rehash(1);
+				copy = indexState.result;
+				
+				indexState.Reset();
+				indexState.RawUpdateU32(counter++);
+				indexState.RawUpdateU64(salt);
+				indexState.RawUpdateResult(copy);
+				indexState.Rehash(1);
+				
+				u32 index = (indexState.result[0] | (indexState.result[1]<<8))%BALLOON_SPACE_COST;
+				
+				// copy in case index==i
+				copy = stateArray[index].result;
+				stateArray[i].RawUpdateU32(counter++);
+				stateArray[i].RawUpdateResult(copy);
+				stateArray[i].Rehash(2);
+			}
+		}
+	}
+	
+	memset(&copy[0],0,sizeof(HashResult));
+	// extract
+	stateArray[BALLOON_SPACE_COST-1].Rehash(BALLOON_EXTRACT_COST);
+	return stateArray[BALLOON_SPACE_COST-1];
 }
 
 bool ShredFile(std::fstream& file){
@@ -932,15 +994,9 @@ bool DecryptExternalFile(Vault& v,std::fstream& encFile,std::fstream& plainFile,
 	return true;
 }
 
-void PrintHash(HashResult res){
-	for (u64 i=0;i<HASH_BYTES;i++){
-		std::cout << std::hex << (int)res[i];
-	}
-	std::cout << std::dec;
-}
-
 void DisplayKeyColors(Sha3State key){
 	Sha3State colorKey = GenerateKey(key,COLOR_KEY_CONSTANT);
+	colorKey.Rehash(COLOR_HASH_ROUNDS);
 	
 	for (u32 i=0;i<4;++i){
 		SetBackgroundRGB(colorKey.result[i*3]&0xF8,colorKey.result[i*3+1]&0xF8,colorKey.result[i*3+2]&0xF8);
@@ -992,7 +1048,7 @@ bool LoadVault(Vault& v,const std::string& path){
 		if (pass.empty())
 			return false;
 		
-		key = InitKey(pass,plainHeader.salt);
+		key = BalloonInitKey(pass,plainHeader.salt);
 		
 		decrypted = v.TryDecrypt(key);
 		if (!decrypted){
@@ -1082,7 +1138,7 @@ bool CreateVault(Vault& v){
 			std::cout << "Master keys do not match!" << std::endl;
 		}
 	}
-	Sha3State key = InitKey(masterPass,v.salt);
+	Sha3State key = BalloonInitKey(masterPass,v.salt);
 	v.SetKey(key);
 	v.fileBlockEnd = 0;
 	v.directory = {};
@@ -1766,8 +1822,13 @@ void VaultMenu(Vault& v){
 		
 		c = GetKey();
 		
-		if (c=='q'||c==3){
-			break;
+		if (c=='q'||c==3||(c==27&&moving)){
+			if (!moving)
+				break;
+			
+			moving = false;
+			moveFile = nullptr;
+			moveDir = nullptr;
 		} else if (c==27&&!v.AtRoot()){
 			currDir = currDir->parent;
 		} else if (c=='j'){

@@ -28,6 +28,5 @@ int main(int argc,char** argv){
 	}
 	
 	VaultMenu(v);
-	
 	return 0;
 }
