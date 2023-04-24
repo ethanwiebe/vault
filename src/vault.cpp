@@ -1916,6 +1916,11 @@ void VaultMenu(Vault& v){
 			moveDir = nullptr;
 		} else if (c==27&&!v.AtRoot()){
 			currDir = currDir->parent;
+			size_t count = currDir->files.size()+currDir->dirs.size()+1;
+			if (selectIndex>=count)
+				selectIndex = count-1;
+			if (v.AtRoot()&&selectIndex==0)
+				selectIndex = 1;
 		} else if (c=='j'){
 			++selectIndex;
 			selectIndex %= itemCount;
