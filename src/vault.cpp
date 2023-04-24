@@ -140,18 +140,19 @@ bool ShredFile(std::fstream& file){
 	return true;
 }
 
-SecretString Secret::GetPass(Sha3State key){
-	Sha3State keyClone = GenerateKey(key,SECRET_KEY_CONSTANT);
-	keyClone.UpdateU16((u16)type);
-	keyClone.UpdateU64(genTime);
-	keyClone.UpdateU32(options.length);
-	keyClone.Rehash(SUB_HASH_ROUNDS);
+SecretString Secret::GetPass(){
+	Sha3State key{};
+	key.UpdateSecretSalt(secretSalt);
+	key.UpdateU64(genTime);
+	key.UpdateU16(length);
+	key = GenerateKey(key,SECRET_KEY_CONSTANT);
+	key.Rehash(SECRET_HASH_ROUNDS);
 	
-	HashResult& res = keyClone.result;
+	HashResult& res = key.result;
 	
 	SecretString pass{};
 	
-	u32 count = options.length;
+	u32 count = length;
 	u32 bits = 0;
 	u32 index = 0;
 	u8 c;
@@ -165,7 +166,7 @@ SecretString Secret::GetPass(Sha3State key){
 		}
 		if (index>=(HASH_BYTES-1)&&bits>=6){
 			// recalc state for more
-			keyClone.Rehash(1);
+			key.Rehash(1);
 			index = 0;
 			bits = 0;
 		}
@@ -529,6 +530,69 @@ u32 File::ReadU32(){
 		num |= data[readHead++]<<(i*8);
 	}
 	return num;
+}
+
+void File::WriteU16(u16 num){
+	for (u64 i=0;i<sizeof(u16);++i){
+		data.push_back(num&0xFF);
+		num >>= 8;
+	}
+}
+
+u16 File::ReadU16(){
+	u16 num = 0;
+	for (u64 i=0;i<sizeof(u16);++i){
+		num |= data[readHead++]<<(i*8);
+	}
+	return num;
+}
+
+void File::WriteU8(u8 num){
+	data.push_back(num);
+}
+
+u8 File::ReadU8(){
+	return data[readHead++];
+}
+
+void File::WriteShortString(const SecretString& str){
+	u8 size;
+	if (str.size()>=255)
+		size = 255;
+	else
+		size = str.size();
+	
+	WriteU8(size);
+	for (u64 i=0;i<size;++i){
+		WriteU8(str[i]);
+	}
+}
+
+void File::ReadShortString(SecretString& str){
+	u8 size = ReadU8();
+	str.resize(size);
+	
+	for (u64 i=0;i<size;++i){
+		str[i] = ReadU8();
+	}
+}
+
+void File::WriteSecret(const Secret& secret){
+	for (u64 i=0;i<sizeof(SecretSalt);++i){
+		data.push_back(secret.secretSalt[i]);
+	}
+	
+	WriteU16(secret.length);
+	WriteShortString(secret.username);
+}
+
+void File::ReadSecret(Secret& secret){
+	for (u64 i=0;i<sizeof(SecretSalt);++i){
+		secret.secretSalt[i] = data[readHead++];
+	}
+	
+	secret.length = ReadU16();
+	ReadShortString(secret.username);
 }
 
 u64 Directory::GetBiggestNameSize() const {
@@ -1115,7 +1179,6 @@ bool CreateVault(Vault& v){
 	
 	SecretString masterPass{};
 	
-	
 	while (true){
 		SecretString checkPass{};
 		
@@ -1203,8 +1266,8 @@ std::string FileMenu(Vault& v,FileDescriptor* file){
 	Secret secret{};
 	if (file->type==FileType::Secret){
 		fp->readHead = 0;
-		u32 length = fp->ReadU32();
-		secret = {SecretType::Service,file->genTime,{length}};
+		fp->ReadSecret(secret);
+		secret.genTime = file->genTime;
 	}
 	
 	while (true){
@@ -1241,12 +1304,20 @@ std::string FileMenu(Vault& v,FileDescriptor* file){
 						break;
 					}
 				}
+				if (lines==0) std::cout << '\n';
 			} else if (file->type==FileType::Secret){
-				SecretString pass = secret.GetPass(v.key);
-				std::cout << pass;
+				SecretString pass = secret.GetPass();
+				if (!secret.username.empty()){
+					std::cout << secret.username << '\n';
+					std::cout << pass;
+				} else {
+					std::cout << pass << '\n';
+				}
 			}
+		} else {
+			std::cout << '\n';
 		}
-		std::cout << "\n\n\n";
+		std::cout << "\n\n";
 		
 		if (!show)
 			std::cout << "s: Show\n";
@@ -1300,7 +1371,7 @@ std::string FileMenu(Vault& v,FileDescriptor* file){
 			}
 			
 			if (file->type==FileType::Secret){
-				SecretString pass = secret.GetPass(v.key);
+				SecretString pass = secret.GetPass();
 				outFile.write(pass.data(),pass.size());
 			} else {
 				outFile.write((char*)fp->data.data(),fp->data.size());
@@ -1316,7 +1387,7 @@ std::string FileMenu(Vault& v,FileDescriptor* file){
 				}
 				
 				if (file->type==FileType::Secret){
-					SecretString pass = secret.GetPass(v.key);
+					SecretString pass = secret.GetPass();
 					SetClipboard(pass);
 				} else {
 					SecretString str{};
@@ -1417,24 +1488,37 @@ std::string FileCreateMenu(Vault& v){
 	fileDesc.name = name;
 	
 	if (choice=='s'){
+		Secret secret;
 		fileDesc.type = FileType::Secret;
+		
+		secret.username = {};
+		std::cout << "Enter username for secret (optional): " << std::flush;
+		std::getline(std::cin,secret.username);
+		
+		TruncateString(secret.username);
+		
 		u32 size = 0;
 		while (size==0){
 			std::cout << "Enter secret length (default 24): ";
 			if (!ReadStdInNumber(size)){
 				size = 0;
 				std::cout << "Could not parse number!" << std::endl;
-			} else if (size>=10000){
+			} else if (size>=65536){
 				size = 0;
-				std::cout << "Secret length too big!" << std::endl;
+				std::cout << "Secret length too big! (max 65535)" << std::endl;
 			} else if (size==0){
 				// set to default if no number is entered
 				size = 24;
 			}
 		}
 		
+		secret.length = size;
+		if (!GenerateRandomBytes(&secret.secretSalt[0],sizeof(SecretSalt))){
+			return "Could not generate randomness for secret!";
+		}
+		
 		file.data = {};
-		file.WriteU32(size);
+		file.WriteSecret(secret);
 		v.AddFile(file,fileDesc);
 	} else if (choice=='f'){
 		fileDesc.type = FileType::File;
@@ -1774,8 +1858,9 @@ void VaultMenu(Vault& v){
 				if (!fp){
 					ss << "? L";
 				} else {
-					u32 size = fp->ReadU32();
-					ss << size << " L";
+					Secret secret;
+					fp->ReadSecret(secret);
+					ss << secret.length << " L";
 				}
 				std::cout << ss.str();
 			}

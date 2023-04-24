@@ -16,8 +16,9 @@
 #define HASH_BITS 512
 #define HASH_BYTES (HASH_BITS>>3)
 
-#define SUB_HASH_ROUNDS 8
-#define COLOR_HASH_ROUNDS 8192
+#define SUB_HASH_ROUNDS        8
+#define COLOR_HASH_ROUNDS   8192
+#define SECRET_HASH_ROUNDS 16384
 
 #define ZERO_VECTOR_SIZE 64
 #define FILE_ZERO_VECTOR_SIZE 8
@@ -28,22 +29,14 @@
 #define BALLOON_SPACE_COST    2048
 #define BALLOON_TIME_COST        2
 #define BALLOON_DELTA_COST       8
-#define BALLOON_EXTRACT_COST  4096
+#define BALLOON_EXTRACT_COST 16384
 
 constexpr u8 VAULT_MAGIC[] = {'E','V','\x00','\x01'};
 constexpr u8 FILE_MAGIC[] = {'E','F','\x05','\x04'};
 
 typedef std::array<u8,HASH_BYTES> HashResult;
+typedef std::array<u8,24> SecretSalt;
 const std::string passwordChars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ123456789!?-_@%";
-
-struct PassOptions {
-	u32 length = 24;
-	
-	inline size_t GetEntropy() const {
-		return length*6;
-	}
-};
-
 
 struct Sha3State {
 	sha3_context ctx;
@@ -127,18 +120,17 @@ struct Sha3State {
 		Rehash(1);
 	}
 	
-	inline void UpdatePassOptions(const PassOptions& ops){
-		static_assert(sizeof(ops)==sizeof(u32));
-		sha3_Update(&ctx,&ops.length,sizeof(ops.length));
-		Rehash(1);
-	}
-	
 	inline void RawUpdateResult(const HashResult& res){
 		sha3_Update(&ctx,&res[0],sizeof(HashResult));
 	}
 	
 	inline void UpdateResult(const HashResult& res){
 		RawUpdateResult(res);
+		Rehash(1);
+	}
+	
+	inline void UpdateSecretSalt(const SecretSalt& salt){
+		sha3_Update(&ctx,&salt[0],sizeof(SecretSalt));
 		Rehash(1);
 	}
 	
@@ -150,16 +142,23 @@ struct Sha3State {
 	}
 };
 
-enum class SecretType : u32 {
-	Service = 0
-};
-
 struct Secret {
-	SecretType type;
+	SecretString username;
+	SecretSalt secretSalt;
 	u64 genTime;
-	PassOptions options = {};
+	u16 length;
 	
-	SecretString GetPass(Sha3State key);
+	SecretString GetPass();
+	Secret(const Secret&) = delete;
+	Secret(Secret&&) = delete;
+	
+	inline Secret() : username(),secretSalt(),genTime(),length() {}
+	inline ~Secret(){
+		volatile u8* overwrite = (volatile u8*)this;
+		for (size_t i=0;i<sizeof(Secret);++i){
+			overwrite[i] = 0;
+		}
+	}
 };
 
 enum class FileType : u16 {
@@ -178,9 +177,18 @@ struct File {
 	
 	void WriteU64(u64);
 	u64 ReadU64();
-	
 	void WriteU32(u32);
 	u32 ReadU32();
+	void WriteU16(u16);
+	u16 ReadU16();
+	void WriteU8(u8);
+	u8 ReadU8();
+	
+	void WriteShortString(const SecretString&);
+	void ReadShortString(SecretString&);
+	
+	void WriteSecret(const Secret&);
+	void ReadSecret(Secret&);
 	
 	File(const File&) = delete;
 	File(File&&) = delete;
@@ -266,8 +274,6 @@ struct Vault {
 	u64 fileBlockEnd = 0;
 	LocationDirectory directory;
 	Directory* currentDir;
-	
-	bool changed = false;
 	
 	void SetKey(Sha3State& k);
 	void SetFile(std::fstream&&,const std::string& path);
