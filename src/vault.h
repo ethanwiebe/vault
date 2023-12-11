@@ -23,6 +23,7 @@
 #define ZERO_VECTOR_SIZE 64
 #define FILE_ZERO_VECTOR_SIZE 8
 #define VERSION_NUMBER 0
+#define VAULT_VERSION_STRING "0.0.0"
 #define EXT_ENCRYPT_EXTENSION "venc"
 #define EXT_DECRYPT_EXTENSION "vdec"
 
@@ -33,6 +34,7 @@
 
 constexpr u8 VAULT_MAGIC[] = {'E','V','\x00','\x01'};
 constexpr u8 FILE_MAGIC[] = {'E','F','\x05','\x04'};
+constexpr u8 EXT_FILE_MAGIC[] = {'E','E','\x07','\x08'};
 
 typedef std::array<u8,HASH_BYTES> HashResult;
 typedef std::array<u8,24> SecretSalt;
@@ -245,8 +247,9 @@ typedef std::unique_ptr<File> FilePointer;
 // magic + version + salt
 constexpr u64 PLAIN_HEADER_SIZE = sizeof(FILE_MAGIC)+sizeof(u32)+sizeof(u64);
 // zeros + locdir size
-constexpr u64 VAULT_HEADER_SIZE = sizeof(u8)*ZERO_VECTOR_SIZE+sizeof(u64);
+constexpr u64 VAULT_HEADER_SIZE = ZERO_VECTOR_SIZE+sizeof(u64)+sizeof(u64);
 constexpr u64 FILE_HEADER_SIZE = sizeof(FILE_MAGIC);
+constexpr u64 EXT_FILE_HEADER_SIZE = sizeof(EXT_FILE_MAGIC)+sizeof(u64)+FILE_ZERO_VECTOR_SIZE;
 
 constexpr s64 PLAIN_HEADER_OFFSET = -PLAIN_HEADER_SIZE-VAULT_HEADER_SIZE;
 constexpr s64 VAULT_HEADER_OFFSET = -VAULT_HEADER_SIZE;
@@ -258,11 +261,14 @@ struct PlainHeader {
 	u32 version;
 	u64 salt;
 };
+static_assert(sizeof(PlainHeader)==PLAIN_HEADER_SIZE);
 
 struct VaultHeader {
 	u8 zeroes[ZERO_VECTOR_SIZE];
 	u64 locDirSize;
+	u64 lastEditTime;
 };
+static_assert(sizeof(VaultHeader)==VAULT_HEADER_SIZE);
 
 struct Vault {
 	Sha3State key;
@@ -272,6 +278,7 @@ struct Vault {
 	u64 salt;
 	
 	u64 fileBlockEnd = 0;
+	u64 editTime = 0;
 	LocationDirectory directory;
 	Directory* currentDir;
 	

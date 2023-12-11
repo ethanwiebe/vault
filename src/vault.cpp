@@ -309,12 +309,13 @@ struct BufferEncryptCtx {
 		EncryptDirectory(locs.root);
 	}
 	
-	void EncryptVaultHeader(u64 locDirSize){
+	void EncryptVaultHeader(u64 locDirSize,u64 lastEditTime){
 		u8 zeroes[ZERO_VECTOR_SIZE];
 		memset(zeroes,0,ZERO_VECTOR_SIZE);
 		
 		Encrypt(zeroes,ZERO_VECTOR_SIZE);
 		EncryptU64(locDirSize);
+		EncryptU64(lastEditTime);
 	}
 };
 
@@ -499,6 +500,7 @@ struct BufferDecryptCtx {
 	void DecryptVaultHeader(VaultHeader& header){
 		Decrypt(header.zeroes,ZERO_VECTOR_SIZE);
 		DecryptU64(header.locDirSize);
+		DecryptU64(header.lastEditTime);
 	}
 };
 
@@ -867,13 +869,14 @@ bool Vault::TryDecrypt(Sha3State& k){
 	BufferDecryptCtx ctx{vaultFile,headerKey};
 	
 	vaultFile.seekg(VAULT_HEADER_OFFSET,std::ios::end);
-	u8 zeroes[ZERO_VECTOR_SIZE];
-	ctx.Decrypt(&zeroes[0],ZERO_VECTOR_SIZE);
+	
+	VaultHeader header;
+	ctx.DecryptVaultHeader(header);
 	
 	for (u32 i=0;i<ZERO_VECTOR_SIZE;++i){
-		if (zeroes[i]!=0){
+		if (header.zeroes[i]!=0){
 			if (gDebug){
-				std::cout << "Decrypt prefix: " << i*8+std::countr_zero(zeroes[i]) << std::endl;
+				std::cout << "Decrypt prefix: " << i*8+std::countr_zero(header.zeroes[i]) << std::endl;
 			}
 			return false;
 		}
@@ -883,9 +886,8 @@ bool Vault::TryDecrypt(Sha3State& k){
 		std::cout << "Decrypt prefix: " << ZERO_VECTOR_SIZE*8 << std::endl;
 	}
 	
-	u64 locDirSize;
-	ctx.DecryptU64(locDirSize);
-	fileBlockEnd = (u64)vaultFile.tellg()-(PLAIN_HEADER_SIZE+VAULT_HEADER_SIZE+locDirSize);
+	fileBlockEnd = (u64)vaultFile.tellg()-(PLAIN_HEADER_SIZE+VAULT_HEADER_SIZE+header.locDirSize);
+	editTime = header.lastEditTime;
 	
 	return true;
 }
@@ -935,7 +937,7 @@ bool Vault::WriteDirectoryAndHeader(){
 	Sha3State headerKey = GenerateKey(key,HEADER_KEY_CONSTANT);
 	
 	BufferEncryptCtx headerCtx{vaultFile,headerKey};
-	headerCtx.EncryptVaultHeader(locDirSize);
+	headerCtx.EncryptVaultHeader(locDirSize,GetTime());
 	
 	PostWrite(locDirSize);
 	return vaultFile.good();
@@ -969,36 +971,42 @@ bool EncryptExternalFile(Vault& v,std::fstream& inFile,std::fstream& outFile){
 		return false;
 	}
 	
-	{
-		BufferWriteCtx writeCtx{outFile};
-		writeCtx.WriteU64(fileSalt);
-	}
-	
 	Sha3State fileKey = GenerateKey(v.key,EXT_ENCRYPT_KEY_CONSTANT);
 	fileKey.UpdateU64(fileSalt);
 	
 	u8 zeroes[FILE_ZERO_VECTOR_SIZE];
 	memset(&zeroes[0],0,FILE_ZERO_VECTOR_SIZE);
 	
+	outFile.seekp(fileSize);
+	{
+		BufferWriteCtx writeCtx{outFile};
+		writeCtx.Write(EXT_FILE_MAGIC,sizeof(EXT_FILE_MAGIC));
+		writeCtx.WriteU64(fileSalt);
+	}
+	
 	BufferEncryptCtx ctx{outFile,fileKey};
 	ctx.Encrypt(&zeroes[0],FILE_ZERO_VECTOR_SIZE);
 	
 	inFile.seekg(0);
+	outFile.seekp(0);
 	u8 encryptBuffer[ENCRYPT_CHUNK_SIZE];
 	u64 i=0;
 	while (i<fileSize){
 		if (fileSize-i<ENCRYPT_CHUNK_SIZE){
 			u64 amount = fileSize-i;
 			inFile.read((char*)&encryptBuffer[0],amount);
+			outFile.seekp(i);
 			ctx.Encrypt(&encryptBuffer[0],amount);
 		} else {
 			inFile.read((char*)&encryptBuffer[0],ENCRYPT_CHUNK_SIZE);
+			outFile.seekp(i);
 			ctx.Encrypt(&encryptBuffer[0],ENCRYPT_CHUNK_SIZE);
 		}
 		i += ENCRYPT_CHUNK_SIZE;
 	}
 	
 	memset(&encryptBuffer[0],0,ENCRYPT_CHUNK_SIZE);
+	
 	if (!inFile) return false;
 	if (!outFile) return false;
 	
@@ -1009,12 +1017,21 @@ bool DecryptExternalFile(Vault& v,std::fstream& encFile,std::fstream& plainFile,
 	u64 fileSalt;
 	u64 fileSize = GetFileSize(encFile);
 	decrypted = false;
-	if (fileSize<sizeof(u64)+FILE_ZERO_VECTOR_SIZE) return false;
-	fileSize -= sizeof(u64)+FILE_ZERO_VECTOR_SIZE;
+	if (fileSize<EXT_FILE_HEADER_SIZE){
+		
+		return false;
+	}
+	fileSize -= EXT_FILE_HEADER_SIZE;
 	
-	encFile.seekg(0);
+	encFile.seekg(fileSize);
 	{
 		BufferReadCtx readCtx{encFile};
+		u8 magic[sizeof(EXT_FILE_MAGIC)];
+		readCtx.Read(magic,sizeof(magic));
+		if (memcmp(magic,EXT_FILE_MAGIC,sizeof(EXT_FILE_MAGIC))!=0){
+			
+			return false;
+		}
 		readCtx.ReadU64(fileSalt);
 	}
 	
@@ -1032,9 +1049,9 @@ bool DecryptExternalFile(Vault& v,std::fstream& encFile,std::fstream& plainFile,
 	}
 	decrypted = true;
 	
-	if (!encFile) return false;
-	
+	encFile.seekg(0);
 	plainFile.seekp(0);
+	if (!encFile) return false;
 	if (!plainFile) return false;
 	
 	u8 decryptBuffer[ENCRYPT_CHUNK_SIZE];
@@ -1043,9 +1060,11 @@ bool DecryptExternalFile(Vault& v,std::fstream& encFile,std::fstream& plainFile,
 		if (fileSize-i<ENCRYPT_CHUNK_SIZE){
 			u64 amount = fileSize-i;
 			ctx.Decrypt(&decryptBuffer[0],amount);
+			plainFile.seekp(i);
 			plainFile.write((char*)&decryptBuffer[0],amount);
 		} else {
 			ctx.Decrypt(&decryptBuffer[0],ENCRYPT_CHUNK_SIZE);
+			plainFile.seekp(i);
 			plainFile.write((char*)&decryptBuffer[0],ENCRYPT_CHUNK_SIZE);
 		}
 		i += ENCRYPT_CHUNK_SIZE;
@@ -1284,7 +1303,7 @@ std::string FileMenu(Vault& v,FileDescriptor* file){
 		if (gDebug){
 			std::cout << "Offset: " << file->location.offset << '\n';
 		}
-		PrintDateAndTime(file->genTime);
+		PrintTime(file->genTime);
 		std::cout << '\n';
 		std::cout << '\n';
 		
@@ -1336,7 +1355,7 @@ std::string FileMenu(Vault& v,FileDescriptor* file){
 		
 		key = GetKey();
 		
-		if (key=='q'||key==3||key==27||key==' '||key=='\n'){
+		if (key=='q'||key==3||key==27||key==' '||key=='\n'||key=='h'){
 			break;
 		} else if (key=='s'){
 			show = !show;
@@ -1440,7 +1459,7 @@ std::string FileCreateMenu(Vault& v){
 	std::cout << std::endl;
 	
 	File file = {};
-	u8 choice;
+	u8 choice = 0;
 	bool chosen = false;
 	while (!chosen){
 		choice = GetKey();
@@ -1619,6 +1638,9 @@ std::string ShredMenu(){
 	std::getline(std::cin,path);
 	TruncateString(path);
 	
+	if (path.empty())
+		return {};
+	
 	std::error_code ec;
 	if (!fs::exists(path,ec)){
 		return "Path '"+path+"' does not exist!";
@@ -1648,32 +1670,38 @@ std::string ShredMenu(){
 	return "File successfully shredded.";
 }
 
-std::string EncryptMenu(Vault& v){
+std::string EncryptMenu(Vault& v,bool inPlace){
 	std::string path{};
-	std::cout << "Enter filename to encrypt: " << std::flush;
+	if (inPlace){
+		std::cout << "Enter filename to in-place encrypt: " << std::flush;
+	} else {
+		std::cout << "Enter filename to encrypt: " << std::flush;
+	}
 	std::getline(std::cin,path);
 	TruncateString(path);
+	if (path.empty())
+		return {};
 	
 	std::error_code ec;
 	if (!fs::exists(path,ec)){
 		return "Path '"+path+"' does not exist!";
 	}
 	
-	std::fstream inFile{path,std::ios::in|std::ios::binary};
+	std::fstream inFile{path,std::ios::in|std::ios::out|std::ios::binary};
 	if (!inFile){
 		return "Cannot read '"+path+"'!";
 	}
 	
-	std::string defaultOutPath = path+"."+EXT_ENCRYPT_EXTENSION;
-	std::string outPath{};
-	std::cout << "Enter output filename (default '" << defaultOutPath << "'): " << std::flush;
-	std::getline(std::cin,outPath);
-	TruncateString(outPath);
-	
-	if (outPath.empty()) outPath = defaultOutPath;
-	if (path==outPath){
-		return "Cannot encrypt file over itself!";
+	std::string outPath = path;
+	if (!inPlace){
+		std::string defaultOutPath = path+"."+EXT_ENCRYPT_EXTENSION;
+		std::cout << "Enter output filename (default '" << defaultOutPath << "'): " << std::flush;
+		std::getline(std::cin,outPath);
+		TruncateString(outPath);
+		
+		if (outPath.empty()) outPath = defaultOutPath;
 	}
+	bool same = (path==outPath);
 	if (fs::exists(outPath,ec)){
 		std::cout << "Overwrite path? Y/N " << std::flush;
 		auto answer = GetYesNoAnswer();
@@ -1681,51 +1709,72 @@ std::string EncryptMenu(Vault& v){
 		if (answer!=YesNoAnswer::Yes){
 			return {};
 		}
+	} else {
+		std::fstream createTest{outPath,std::ios::out|std::ios::binary|std::ios::trunc};
+		if (!createTest){
+			return "Could not create output file!";
+		}
 	}
 	
-	std::fstream outFile{outPath,std::ios::out|std::ios::binary|std::ios::trunc};
+	std::fstream outFile;
+	if (!same){
+		size_t fSize = GetFileSize(inFile);
+		fs::resize_file(outPath,fSize+EXT_FILE_HEADER_SIZE);
+		outFile = std::fstream{outPath,std::ios::out|std::ios::binary};
+	}
+	std::fstream& outRef = (same) ? inFile : outFile;
 	
-	if (!outFile){
+	if (!outRef){
 		return "Cannot write to '"+outPath+"'!";
 	}
 	
-	if (!EncryptExternalFile(v,inFile,outFile))
+	if (!EncryptExternalFile(v,inFile,outRef))
 		return "Could not encrypt file!";
 	
-	return "File '"+path+"' successfully encrypted to '"+outPath+"'.";
+	if (inPlace)
+		return "File '"+path+"' successfully encrypted in-place.";
+	else
+		return "File '"+path+"' successfully encrypted to '"+outPath+"'.";
 }
 
-std::string DecryptMenu(Vault& v){
+std::string DecryptMenu(Vault& v,bool inPlace){
 	std::string path{};
-	std::cout << "Enter filename to decrypt: " << std::flush;
+	if (inPlace){
+		std::cout << "Enter filename to in-place decrypt: " << std::flush;
+	} else {
+		std::cout << "Enter filename to decrypt: " << std::flush;
+	}
 	std::getline(std::cin,path);
 	TruncateString(path);
+	if (path.empty())
+		return {};
 	
 	std::error_code ec;
 	if (!fs::exists(path,ec)){
 		return "Path '"+path+"' does not exist!";
 	}
 	
-	std::fstream encFile{path,std::ios::in|std::ios::binary};
+	std::fstream encFile{path,std::ios::in|std::ios::out|std::ios::binary};
 	if (!encFile){
 		return "Cannot read '"+path+"'!";
 	}
-	
-	std::string defaultOutPath{};
-	if (path.ends_with("." EXT_ENCRYPT_EXTENSION)){
-		defaultOutPath = path.substr(0,path.size()-strlen("." EXT_ENCRYPT_EXTENSION));
-	} else {
-		defaultOutPath = path+"."+EXT_DECRYPT_EXTENSION;
+	size_t plainSize = GetFileSize(encFile)-EXT_FILE_HEADER_SIZE;
+	std::string outPath = path;
+	if (!inPlace){
+		std::string defaultOutPath{};
+		if (path.ends_with("." EXT_ENCRYPT_EXTENSION)){
+			defaultOutPath = path.substr(0,path.size()-strlen("." EXT_ENCRYPT_EXTENSION));
+		} else {
+			defaultOutPath = path+"."+EXT_DECRYPT_EXTENSION;
+		}
+		
+		std::cout << "Enter output filename (default '" << defaultOutPath << "'): " << std::flush;
+		std::getline(std::cin,outPath);
+		TruncateString(outPath);
+		
+		if (outPath.empty()) outPath = defaultOutPath;
 	}
-	std::string outPath{};
-	std::cout << "Enter output filename (default '" << defaultOutPath << "'): " << std::flush;
-	std::getline(std::cin,outPath);
-	TruncateString(outPath);
-	
-	if (outPath.empty()) outPath = defaultOutPath;
-	if (path==outPath){
-		return "Cannot decrypt file over itself!";
-	}
+	bool same = (path==outPath);
 	if (fs::exists(outPath,ec)){
 		std::cout << "Overwrite path? Y/N " << std::flush;
 		auto answer = GetYesNoAnswer();
@@ -1735,31 +1784,39 @@ std::string DecryptMenu(Vault& v){
 		}
 	}
 	
-	bool decrypted = false;
-	bool error = false;
 	{
-		std::fstream plainFile{outPath,std::ios::out|std::ios::binary};
+		std::fstream plainFile;
+		if (!same){
+			plainFile = std::fstream{outPath,std::ios::out|std::ios::binary};
+		}
+		std::fstream& outRef = (same) ? encFile : plainFile;
 		
-		if (!plainFile){
+		bool decrypted = false;
+		bool error = false;
+		
+		if (!outRef){
 			return "Cannot write to '"+outPath+"'!";
 		}
 		
-		if (!DecryptExternalFile(v,encFile,plainFile,decrypted)){
+		if (!DecryptExternalFile(v,encFile,outRef,decrypted)){
 			error = true;
+		}
+		
+		if (error){
+			return "Could not decrypt file!";
+		}
+		
+		if (!decrypted){
+			return "File was not encrypted by this vault!";
 		}
 	}
 	
-	if (error){
-		fs::remove(outPath,ec);
-		return "Could not decrypt file!";
-	}
+	fs::resize_file(outPath,plainSize);
 	
-	if (!decrypted){
-		fs::remove(outPath,ec);
-		return "File was not encrypted by this vault!";
-	}
-	
-	return "File '"+path+"' successfully decrypted to '"+outPath+"'.";
+	if (inPlace)
+		return "File '"+path+"' successfully decrypted in-place.";
+	else
+		return "File '"+path+"' successfully decrypted to '"+outPath+"'.";
 }
 
 
@@ -1769,10 +1826,10 @@ std::string UtilsMenu(Vault& v){
 	while (true){
 		ClearConsole();
 		std::cout << "Utility Menu\n\n";
-		std::cout << "s: Shred external file\n";
-		std::cout << "e: Encrypt external file\n";
-		std::cout << "d: Decrypt external file\n";
-		std::cout << "q: Back\n";
+		std::cout << "s:   Shred external file\n";
+		std::cout << "e,E: Encrypt external file\n";
+		std::cout << "d,D: Decrypt external file\n";
+		std::cout << "q:   Back\n";
 		
 		std::cout << "\n" << msg << "\n";
 		std::cout << std::endl;
@@ -1783,9 +1840,13 @@ std::string UtilsMenu(Vault& v){
 		} else if (c=='s'){
 			msg = ShredMenu();
 		} else if (c=='e'){
-			msg = EncryptMenu(v);
+			msg = EncryptMenu(v,false);
+		} else if (c=='E'){
+			msg = EncryptMenu(v,true);
 		} else if (c=='d'){
-			msg = DecryptMenu(v);
+			msg = DecryptMenu(v,false);
+		} else if (c=='D'){
+			msg = DecryptMenu(v,true);
 		}
 	}
 	
@@ -1810,6 +1871,8 @@ void VaultMenu(Vault& v){
 		ClearConsole();
 		std::cout << "Vault Menu\n";
 		DisplayKeyColors(v.key);
+		std::cout << '\n';
+		PrintTime(v.editTime);
 		std::cout << "\n\n";
 		
 		itemCount = 0;
@@ -1914,7 +1977,7 @@ void VaultMenu(Vault& v){
 			moving = false;
 			moveFile = nullptr;
 			moveDir = nullptr;
-		} else if (c==27&&!v.AtRoot()){
+		} else if ((c==27||c=='h')&&!v.AtRoot()){
 			currDir = currDir->parent;
 			size_t count = currDir->files.size()+currDir->dirs.size()+1;
 			if (selectIndex>=count)
@@ -1950,7 +2013,7 @@ void VaultMenu(Vault& v){
 				itemCount -= 1;
 				selectIndex %= itemCount;
 			}
-		} else if (c==' '||c=='\n'||c=='\r'){
+		} else if (c==' '||c=='\n'||c=='\r'||c=='l'){
 			if (selectIndex<currDir->dirs.size()+1){
 				Directory* newDir = GetDirFromList(currDir,selectIndex);
 				if (newDir!=nullptr){

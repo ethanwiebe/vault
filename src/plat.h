@@ -34,6 +34,14 @@ inline u64 GetTime(){
 	return time(NULL);
 }
 
+inline void PrintTime(u64 t){
+	static u8 charBuf[256];
+	time_t a = t;
+	struct tm* calendar = localtime(&a);
+	strftime((char*)charBuf,sizeof(charBuf),"%Y/%m/%d %H:%M",calendar);
+	std::cout << charBuf;
+}
+
 inline u64 GetFileSize(std::fstream& file){
 	file.seekg(0,std::ios::end);
 	return file.tellg();
@@ -66,21 +74,6 @@ inline YesNoAnswer GetYesNoAnswer(){
 			return YesNoAnswer::None;
 		}
 	}
-}
-
-inline void PrintDate(u64 time){
-	struct tm* local = localtime((time_t*)&time);
-	
-	std::cout << std::setfill('0');
-	std::cout << local->tm_year+1900 << '/' << std::setw(2) << local->tm_mon+1 << '/' << std::setw(2) << local->tm_mday;
-}
-
-inline void PrintDateAndTime(u64 time){
-	struct tm* local = localtime((time_t*)&time);
-	
-	std::cout << std::setfill('0');
-	std::cout << local->tm_year+1900 << '/' << std::setw(2) << local->tm_mon+1 << '/' << std::setw(2) << local->tm_mday;
-	std::cout << " " << std::setw(2) << local->tm_hour << ':' << std::setw(2) << local->tm_min;
 }
 
 inline void ResetTextStyle(){

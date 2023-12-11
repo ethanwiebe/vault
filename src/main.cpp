@@ -9,8 +9,8 @@ int main(int argc,char** argv){
 	
 	Vault v;
 	std::string path;
-
 	if (argc==1){
+		std::cout << "vault v" VAULT_VERSION_STRING << '\n' << std::endl;
 		if (!CreateVault(v)){
 			std::cout << "Could not create vault!" << std::endl;
 			exit(1);
@@ -21,6 +21,7 @@ int main(int argc,char** argv){
 			DisplayHelpMessage();
 			exit(0);
 		} else {
+			std::cout << "vault v" VAULT_VERSION_STRING << '\n' << std::endl;
 			if (!LoadVault(v,arg)){
 				exit(1);
 			}
