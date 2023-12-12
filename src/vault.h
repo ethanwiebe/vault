@@ -23,7 +23,7 @@
 #define ZERO_VECTOR_SIZE 64
 #define FILE_ZERO_VECTOR_SIZE 8
 #define VERSION_NUMBER 0
-#define VAULT_VERSION_STRING "0.0.0"
+#define VAULT_VERSION_STRING "0.1.0"
 #define EXT_ENCRYPT_EXTENSION "venc"
 #define EXT_DECRYPT_EXTENSION "vdec"
 
@@ -246,8 +246,8 @@ typedef std::unique_ptr<File> FilePointer;
 
 // magic + version + salt
 constexpr u64 PLAIN_HEADER_SIZE = sizeof(FILE_MAGIC)+sizeof(u32)+sizeof(u64);
-// zeros + locdir size
-constexpr u64 VAULT_HEADER_SIZE = ZERO_VECTOR_SIZE+sizeof(u64)+sizeof(u64);
+// zeros + locdir size + last edit time size
+constexpr u64 VAULT_HEADER_SIZE = ZERO_VECTOR_SIZE+sizeof(u64)*3;
 constexpr u64 FILE_HEADER_SIZE = sizeof(FILE_MAGIC);
 constexpr u64 EXT_FILE_HEADER_SIZE = sizeof(EXT_FILE_MAGIC)+sizeof(u64)+FILE_ZERO_VECTOR_SIZE;
 
@@ -266,6 +266,7 @@ static_assert(sizeof(PlainHeader)==PLAIN_HEADER_SIZE);
 struct VaultHeader {
 	u8 zeroes[ZERO_VECTOR_SIZE];
 	u64 locDirSize;
+	u64 fileBlockEnd;
 	u64 lastEditTime;
 };
 static_assert(sizeof(VaultHeader)==VAULT_HEADER_SIZE);
@@ -305,7 +306,7 @@ struct Vault {
 	
 	bool WriteFileAtEnd(const File& file,const FileDescriptor& desc);
 	bool WriteDirectoryAndHeader();
-	void PostWrite(u64 locDirSize);
+	void PostWrite(u64 locDirSize,u64 padSize);
 	
 	bool AtRoot() const;
 	SecretString GetPath() const;

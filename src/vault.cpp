@@ -23,8 +23,8 @@
 #define BYTESWAP64(x) ((((x)&0xFFULL)<<56) | (((x)&0xFF00ULL)<<40) | (((x)&0xFF0000ULL)<<24) | (((x)&0xFF000000ULL)<<8) | \
 					   (((x)&0xFF00000000ULL)>>8) | (((x)&0xFF0000000000ULL)>>24) | (((x)&0xFF000000000000ULL)>>40) | (((x)&0xFF00000000000000ULL)>>56))
 
-#define SHRED_CHUNK_SIZE 64
-#define ENCRYPT_CHUNK_SIZE 64
+#define SHRED_CHUNK_SIZE 1024
+#define ENCRYPT_CHUNK_SIZE 1024
 
 namespace fs = std::filesystem;
 
@@ -126,7 +126,7 @@ bool ShredFile(std::fstream& file){
 	if (!file) return false;
 	
 	u64 i=0;
-	u8 rands[SHRED_CHUNK_SIZE];
+	static u8 rands[SHRED_CHUNK_SIZE];
 	while (i<size){
 		if (!GenerateRandomBytes((u8*)&rands,SHRED_CHUNK_SIZE)) return false;
 		if (size-i<SHRED_CHUNK_SIZE){
@@ -309,12 +309,13 @@ struct BufferEncryptCtx {
 		EncryptDirectory(locs.root);
 	}
 	
-	void EncryptVaultHeader(u64 locDirSize,u64 lastEditTime){
+	void EncryptVaultHeader(u64 locDirSize,u64 fileBlockEnd,u64 lastEditTime){
 		u8 zeroes[ZERO_VECTOR_SIZE];
 		memset(zeroes,0,ZERO_VECTOR_SIZE);
 		
 		Encrypt(zeroes,ZERO_VECTOR_SIZE);
 		EncryptU64(locDirSize);
+		EncryptU64(fileBlockEnd);
 		EncryptU64(lastEditTime);
 	}
 };
@@ -500,6 +501,7 @@ struct BufferDecryptCtx {
 	void DecryptVaultHeader(VaultHeader& header){
 		Decrypt(header.zeroes,ZERO_VECTOR_SIZE);
 		DecryptU64(header.locDirSize);
+		DecryptU64(header.fileBlockEnd);
 		DecryptU64(header.lastEditTime);
 	}
 };
@@ -772,18 +774,28 @@ void Vault::AddFile(const File& file,FileDescriptor& desc){
 void Vault::DeleteFileRaw(FileDescriptor& delFile){
 	FileLocation loc = delFile.location;
 	// copy data to close gap
-	std::vector<char> buffer{};
+	static u8 copyBuf[2048];
 	
-	u64 writeDist = fileBlockEnd-(loc.offset+loc.size+FILE_HEADER_SIZE);
-	buffer.resize(writeDist);
+	u64 startPos = loc.offset+loc.size+FILE_HEADER_SIZE;
+	u64 writeDist = fileBlockEnd-startPos;
+	u64 i = 0;
+	while (i<writeDist){
+		vaultFile.seekg(startPos+i);
+		if (i+sizeof(copyBuf)>writeDist){
+			u64 remain = writeDist-i;
+			vaultFile.read((char*)copyBuf,remain);
+			vaultFile.seekp(loc.offset+i);
+			vaultFile.write((char*)copyBuf,remain);
+		} else {
+			vaultFile.read((char*)copyBuf,sizeof(copyBuf));
+			vaultFile.seekp(loc.offset+i);
+			vaultFile.write((char*)copyBuf,sizeof(copyBuf));
+		}
+		
+		i += sizeof(copyBuf);
+	}
 	
-	vaultFile.seekg(loc.offset+loc.size+FILE_HEADER_SIZE);
-	vaultFile.read(buffer.data(),writeDist);
-	
-	vaultFile.seekp(loc.offset);
-	vaultFile.write(buffer.data(),writeDist);
-	
-	std::fill(buffer.begin(),buffer.end(),0);
+	memset(copyBuf,0,sizeof(copyBuf));
 	
 	fileBlockEnd -= loc.size+FILE_HEADER_SIZE;
 	directory.root.ShrinkFilesAfter(loc.offset,loc.size+FILE_HEADER_SIZE);
@@ -886,7 +898,7 @@ bool Vault::TryDecrypt(Sha3State& k){
 		std::cout << "Decrypt prefix: " << ZERO_VECTOR_SIZE*8 << std::endl;
 	}
 	
-	fileBlockEnd = (u64)vaultFile.tellg()-(PLAIN_HEADER_SIZE+VAULT_HEADER_SIZE+header.locDirSize);
+	fileBlockEnd = header.fileBlockEnd;
 	editTime = header.lastEditTime;
 	
 	return true;
@@ -923,13 +935,29 @@ bool Vault::WriteFileAtEnd(const File& file,const FileDescriptor& desc){
 	return true;
 }
 
+inline u64 QuantizeToPowerOfTwo(u64 v){
+	if (v<=4096)
+		return 4096;
+	return (1ULL << (64-__builtin_clzll(v-1)));
+}
+
 bool Vault::WriteDirectoryAndHeader(){
 	Sha3State locDirKey = GenerateKey(key,LOCDIR_KEY_CONSTANT);
 	BufferEncryptCtx ctx{vaultFile,locDirKey};
 	
 	vaultFile.seekp(fileBlockEnd);
 	ctx.EncryptLocationDirectory(directory);
-	u64 locDirSize = (u64)vaultFile.tellg()-fileBlockEnd;
+	u64 pos = (u64)vaultFile.tellg();
+	u64 locDirSize = pos-fileBlockEnd;
+	u64 quantizeSize = QuantizeToPowerOfTwo(pos+PLAIN_HEADER_SIZE+VAULT_HEADER_SIZE);
+	u64 padSize = quantizeSize-pos-VAULT_HEADER_SIZE-PLAIN_HEADER_SIZE;
+	
+	for (size_t i=0;i<(padSize&7);++i){
+		ctx.EncryptU8(0);
+	}
+	for (size_t i=0;i<padSize/8;++i){
+		ctx.EncryptU64(0);
+	}
 	
 	BufferWriteCtx plainCtx{vaultFile};
 	plainCtx.WritePlainHeader(salt);
@@ -937,14 +965,14 @@ bool Vault::WriteDirectoryAndHeader(){
 	Sha3State headerKey = GenerateKey(key,HEADER_KEY_CONSTANT);
 	
 	BufferEncryptCtx headerCtx{vaultFile,headerKey};
-	headerCtx.EncryptVaultHeader(locDirSize,GetTime());
-	
-	PostWrite(locDirSize);
+	editTime = GetTime();
+	headerCtx.EncryptVaultHeader(locDirSize,fileBlockEnd,editTime);
+	PostWrite(locDirSize,padSize);
 	return vaultFile.good();
 }
 
-void Vault::PostWrite(u64 locDirSize){
-	u64 fileSize = fileBlockEnd+locDirSize+PLAIN_HEADER_SIZE+VAULT_HEADER_SIZE;
+void Vault::PostWrite(u64 locDirSize,u64 padSize){
+	u64 fileSize = fileBlockEnd+locDirSize+padSize+PLAIN_HEADER_SIZE+VAULT_HEADER_SIZE;
 	fs::resize_file(vaultPath,fileSize);
 }
 
@@ -989,7 +1017,7 @@ bool EncryptExternalFile(Vault& v,std::fstream& inFile,std::fstream& outFile){
 	
 	inFile.seekg(0);
 	outFile.seekp(0);
-	u8 encryptBuffer[ENCRYPT_CHUNK_SIZE];
+	static u8 encryptBuffer[ENCRYPT_CHUNK_SIZE];
 	u64 i=0;
 	while (i<fileSize){
 		if (fileSize-i<ENCRYPT_CHUNK_SIZE){
@@ -1029,7 +1057,6 @@ bool DecryptExternalFile(Vault& v,std::fstream& encFile,std::fstream& plainFile,
 		u8 magic[sizeof(EXT_FILE_MAGIC)];
 		readCtx.Read(magic,sizeof(magic));
 		if (memcmp(magic,EXT_FILE_MAGIC,sizeof(EXT_FILE_MAGIC))!=0){
-			
 			return false;
 		}
 		readCtx.ReadU64(fileSalt);
@@ -1054,7 +1081,7 @@ bool DecryptExternalFile(Vault& v,std::fstream& encFile,std::fstream& plainFile,
 	if (!encFile) return false;
 	if (!plainFile) return false;
 	
-	u8 decryptBuffer[ENCRYPT_CHUNK_SIZE];
+	static u8 decryptBuffer[ENCRYPT_CHUNK_SIZE];
 	u64 i=0;
 	while (i<fileSize){
 		if (fileSize-i<ENCRYPT_CHUNK_SIZE){

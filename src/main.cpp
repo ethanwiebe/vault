@@ -6,7 +6,6 @@ bool gDebug = false;
 int main(int argc,char** argv){
 	std::cout.sync_with_stdio(false);
 	PlatInit();
-	
 	Vault v;
 	std::string path;
 	if (argc==1){
