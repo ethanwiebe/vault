@@ -1575,6 +1575,10 @@ std::string FileCreateMenu(Vault& v){
 			return "Path doesn't exist!";
 		}
 		
+		if (fs::is_directory(path,ec)){
+			return "Cannot import directories. Convert to an archive first.";
+		}
+		
 		{
 			std::fstream importFile{path,std::ios::in|std::ios::binary};
 			if (!importFile){
@@ -1714,6 +1718,10 @@ std::string EncryptMenu(Vault& v,bool inPlace){
 		return "Path '"+path+"' does not exist!";
 	}
 	
+	if (fs::is_directory(path,ec)){
+		return "Cannot encrypt directories. Convert to an archive first.";
+	}
+	
 	std::fstream inFile{path,std::ios::in|std::ios::out|std::ios::binary};
 	if (!inFile){
 		return "Cannot read '"+path+"'!";
@@ -1779,6 +1787,10 @@ std::string DecryptMenu(Vault& v,bool inPlace){
 	std::error_code ec;
 	if (!fs::exists(path,ec)){
 		return "Path '"+path+"' does not exist!";
+	}
+	
+	if (fs::is_directory(path,ec)){
+		return "Cannot decrypt directories.";
 	}
 	
 	std::fstream encFile{path,std::ios::in|std::ios::out|std::ios::binary};
